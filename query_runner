@@ -215,7 +215,8 @@ list_drivers() {
     
     if [[ -d "$DRIVERS_DIR" ]]; then
         while IFS= read -r -d '' jar; do
-            local basename=$(basename "$jar")
+            local basename
+            basename=$(basename "$jar")
             case "$basename" in
                 *mysql*) found_drivers+=("MySQL: $basename") ;;
                 *postgresql*) found_drivers+=("PostgreSQL: $basename") ;;
@@ -276,13 +277,12 @@ load_env() {
     DB_USER="${CLI_USER:-${DB_USER:-}}"
     DB_PASSWORD="${CLI_PASSWORD:-${DB_PASSWORD:-}}"
     
-    # Auto-detect or use specified database type
+# Auto-detect or use specified database type
     local db_type
     if [[ -n "${CLI_TYPE:-}" ]]; then
         db_type="$CLI_TYPE"
     else
-        db_type=$(detect_database_type)
-        if [[ $? -ne 0 ]]; then
+        if ! db_type=$(detect_database_type); then
             echo "Error: Could not auto-detect database type" >&2
             echo "Please specify DB_TYPE in .env or use -t option" >&2
             echo "Supported types: mysql, postgresql, oracle, sqlserver, db2, h2, sqlite" >&2
@@ -525,7 +525,8 @@ EOF
 }
 
 interactive_mode() {
-    local db_type=$(detect_database_type)
+    local db_type
+    db_type=$(detect_database_type)
     echo "Query Runner - Interactive Mode" >&2
     echo "Database Type: $db_type" >&2
     if [[ "$db_type" != "sqlite" ]]; then
