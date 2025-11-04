@@ -1,0 +1,684 @@
+#!/bin/bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/.env"
+DRIVERS_DIR="$SCRIPT_DIR/drivers"
+
+usage() {
+    cat << EOF
+Usage: $(basename "$0") [OPTIONS] [QUERY_FILE]
+
+Execute read-only SQL queries using JDBC with autoconfiguration.
+
+Arguments:
+    QUERY_FILE    Optional path to file containing SQL query.
+                  If not provided, reads query from stdin.
+
+Options:
+    -f, --format FORMAT        Output format: text, csv, json, pretty (default: text)
+    -t, --type TYPE            Database type: mysql, postgresql, oracle, sqlserver, db2, h2, sqlite (auto-detect if not specified)
+    -h, --host HOST            Database host (overrides .env)
+    -p, --port PORT            Database port (overrides .env)
+    -d, --database DATABASE    Database name (overrides .env)
+    -u, --user USER            Database user (overrides .env)
+    -P, --password PASSWORD    Database password (overrides .env)
+    -e, --env-file FILE        Custom environment file (default: .env)
+    --drivers-dir DIR          Directory containing JDBC drivers (default: ./drivers)
+    --list-drivers             List available database drivers and exit
+    --test-connection          Test database connection and exit
+    -h, --help                 Show this help message
+
+Examples:
+    echo "SELECT * FROM users LIMIT 10" | $(basename "$0")
+    $(basename "$0") -t mysql query.sql
+    $(basename "$0") -f json --host localhost --port 5432 -t postgresql query.sql
+    $(basename "$0") --test-connection
+
+Environment:
+    Uses .env file for database connection settings. Autoconfigures based on DB_TYPE.
+    Supported types: mysql, postgresql, oracle, sqlserver, db2, h2, sqlite
+EOF
+    exit 1
+}
+
+check_read_only() {
+    local query="$1"
+    local normalized_query
+    normalized_query=$(echo "$query" | tr '[:upper:]' '[:lower:]' | sed 's/--.*$//' | sed 's/\s\+/ /g' | xargs)
+    
+    local dangerous_patterns=(
+        "insert "
+        "update "
+        "delete "
+        "drop "
+        "create "
+        "alter "
+        "truncate "
+        "exec "
+        "execute "
+        "grant "
+        "revoke "
+        "commit "
+        "rollback "
+    )
+    
+    for pattern in "${dangerous_patterns[@]}"; do
+        if [[ "$normalized_query" =~ ^[[:space:]]*$pattern ]]; then
+            echo "Error: Only read-only queries are allowed. Detected potentially dangerous pattern: $pattern" >&2
+            exit 1
+        fi
+    done
+    
+    if [[ ! "$normalized_query" =~ ^[[:space:]]*(select|with|show|describe|explain)[[:space:]] ]]; then
+        echo "Error: Query must start with a read-only operation (SELECT, WITH, SHOW, DESCRIBE, EXPLAIN)" >&2
+        exit 1
+    fi
+}
+
+detect_database_type() {
+    local db_type="${DB_TYPE:-}"
+    
+    if [[ -n "$db_type" ]]; then
+        echo "$db_type"
+        return 0
+    fi
+    
+    # Try to detect from JDBC_URL if available
+    if [[ -n "${JDBC_URL:-}" ]]; then
+        case "$JDBC_URL" in
+            *mysql*) echo "mysql"; return 0 ;;
+            *postgresql*) echo "postgresql"; return 0 ;;
+            *oracle*) echo "oracle"; return 0 ;;
+            *sqlserver*) echo "sqlserver"; return 0 ;;
+            *db2*) echo "db2"; return 0 ;;
+            *h2*) echo "h2"; return 0 ;;
+            *sqlite*) echo "sqlite"; return 0 ;;
+        esac
+    fi
+    
+    # Try to detect from available drivers
+    if [[ -d "$DRIVERS_DIR" ]]; then
+        if ls "$DRIVERS_DIR"/*mysql* 1> /dev/null 2>&1; then echo "mysql"; return 0; fi
+        if ls "$DRIVERS_DIR"/*postgresql* 1> /dev/null 2>&1; then echo "postgresql"; return 0; fi
+        if ls "$DRIVERS_DIR"/*oracle* 1> /dev/null 2>&1; then echo "oracle"; return 0; fi
+        if ls "$DRIVERS_DIR"/*sqlserver* 1> /dev/null 2>&1; then echo "sqlserver"; return 0; fi
+        if ls "$DRIVERS_DIR"/*db2* 1> /dev/null 2>&1; then echo "db2"; return 0; fi
+        if ls "$DRIVERS_DIR"/*h2* 1> /dev/null 2>&1; then echo "h2"; return 0; fi
+        if ls "$DRIVERS_DIR"/*sqlite* 1> /dev/null 2>&1; then echo "sqlite"; return 0; fi
+    fi
+    
+    return 1
+}
+
+configure_database() {
+    local db_type="$1"
+    
+    case "$db_type" in
+        mysql)
+            DB_PORT="${DB_PORT:-3306}"
+            JDBC_DRIVER_CLASS="${JDBC_DRIVER_CLASS:-com.mysql.cj.jdbc.Driver}"
+            if [[ -z "${JDBC_URL:-}" ]]; then
+                JDBC_URL="jdbc:mysql://${DB_HOST}:${DB_PORT}/${DB_DATABASE}"
+            fi
+            DRIVER_JAR="${DRIVER_JAR:-mysql-connector-java*.jar}"
+            ;;
+        postgresql)
+            DB_PORT="${DB_PORT:-5432}"
+            JDBC_DRIVER_CLASS="${JDBC_DRIVER_CLASS:-org.postgresql.Driver}"
+            if [[ -z "${JDBC_URL:-}" ]]; then
+                JDBC_URL="jdbc:postgresql://${DB_HOST}:${DB_PORT}/${DB_DATABASE}"
+            fi
+            DRIVER_JAR="${DRIVER_JAR:-postgresql*.jar}"
+            ;;
+        oracle)
+            DB_PORT="${DB_PORT:-1521}"
+            JDBC_DRIVER_CLASS="${JDBC_DRIVER_CLASS:-oracle.jdbc.OracleDriver}"
+            if [[ -z "${JDBC_URL:-}" ]]; then
+                JDBC_URL="jdbc:oracle:thin:@${DB_HOST}:${DB_PORT}:${DB_DATABASE}"
+            fi
+            DRIVER_JAR="${DRIVER_JAR:-ojdbc*.jar}"
+            ;;
+        sqlserver)
+            DB_PORT="${DB_PORT:-1433}"
+            JDBC_DRIVER_CLASS="${JDBC_DRIVER_CLASS:-com.microsoft.sqlserver.jdbc.SQLServerDriver}"
+            if [[ -z "${JDBC_URL:-}" ]]; then
+                JDBC_URL="jdbc:sqlserver://${DB_HOST}:${DB_PORT};databaseName=${DB_DATABASE}"
+            fi
+            DRIVER_JAR="${DRIVER_JAR:-mssql-jdbc*.jar}"
+            ;;
+        db2)
+            DB_PORT="${DB_PORT:-50000}"
+            JDBC_DRIVER_CLASS="${JDBC_DRIVER_CLASS:-com.ibm.db2.jcc.DB2Driver}"
+            if [[ -z "${JDBC_URL:-}" ]]; then
+                JDBC_URL="jdbc:db2://${DB_HOST}:${DB_PORT}/${DB_DATABASE}"
+            fi
+            DRIVER_JAR="${DRIVER_JAR:-db2jcc*.jar jt400*.jar}"
+            ;;
+        h2)
+            DB_PORT="${DB_PORT:-9092}"
+            JDBC_DRIVER_CLASS="${JDBC_DRIVER_CLASS:-org.h2.Driver}"
+            if [[ -z "${JDBC_URL:-}" ]]; then
+                JDBC_URL="jdbc:h2:tcp://${DB_HOST}:${DB_PORT}/${DB_DATABASE}"
+            fi
+            DRIVER_JAR="${DRIVER_JAR:-h2*.jar}"
+            ;;
+        sqlite)
+            JDBC_DRIVER_CLASS="${JDBC_DRIVER_CLASS:-org.sqlite.JDBC}"
+            if [[ -z "${JDBC_URL:-}" ]]; then
+                JDBC_URL="jdbc:sqlite:${DB_DATABASE}"
+            fi
+            DRIVER_JAR="${DRIVER_JAR:-sqlite-jdbc*.jar}"
+            ;;
+        *)
+            echo "Error: Unsupported database type: $db_type" >&2
+            echo "Supported types: mysql, postgresql, oracle, sqlserver, db2, h2, sqlite" >&2
+            exit 1
+            ;;
+    esac
+}
+
+find_driver_jar() {
+    local driver_pattern="$1"
+    local jar_files=()
+    
+    # Search in drivers directory
+    if [[ -d "$DRIVERS_DIR" ]]; then
+        for pattern in $driver_pattern; do
+            while IFS= read -r -d '' jar; do
+                jar_files+=("$jar")
+            done < <(find "$DRIVERS_DIR" -name "$pattern" -type f -print0 2>/dev/null)
+        done
+    fi
+    
+    # Search in script directory
+    while IFS= read -r -d '' jar; do
+        jar_files+=("$jar")
+    done < <(find "$SCRIPT_DIR" -name "*.jar" -type f -print0 2>/dev/null)
+    
+    if [[ ${#jar_files[@]} -eq 0 ]]; then
+        echo "Error: No JDBC driver found matching pattern: $driver_pattern" >&2
+        echo "Please place the appropriate JDBC driver JAR in $DRIVERS_DIR or $SCRIPT_DIR" >&2
+        exit 1
+    fi
+    
+    # Return the first match
+    echo "${jar_files[0]}"
+}
+
+list_drivers() {
+    echo "Available database drivers:"
+    echo "=========================="
+    
+    local found_drivers=()
+    
+    if [[ -d "$DRIVERS_DIR" ]]; then
+        while IFS= read -r -d '' jar; do
+            local basename=$(basename "$jar")
+            case "$basename" in
+                *mysql*) found_drivers+=("MySQL: $basename") ;;
+                *postgresql*) found_drivers+=("PostgreSQL: $basename") ;;
+                *oracle*) found_drivers+=("Oracle: $basename") ;;
+                *sqlserver*|*mssql*) found_drivers+=("SQL Server: $basename") ;;
+                *db2*|*jt400*) found_drivers+=("DB2/AS400: $basename") ;;
+                *h2*) found_drivers+=("H2: $basename") ;;
+                *sqlite*) found_drivers+=("SQLite: $basename") ;;
+                *) found_drivers+=("Unknown: $basename") ;;
+            esac
+        done < <(find "$DRIVERS_DIR" -name "*.jar" -type f -print0 2>/dev/null)
+    fi
+    
+    if [[ ${#found_drivers[@]} -eq 0 ]]; then
+        echo "No JDBC drivers found in $DRIVERS_DIR"
+        echo "Download drivers and place them in the drivers directory:"
+        echo "- MySQL: https://dev.mysql.com/downloads/connector/j/"
+        echo "- PostgreSQL: https://jdbc.postgresql.org/download/"
+        echo "- Oracle: https://www.oracle.com/database/technologies/appdev/jdbc-downloads.html"
+        echo "- SQL Server: https://docs.microsoft.com/en-us/sql/connect/jdbc/download-microsoft-jdbc-driver-for-sql-server"
+        echo "- DB2: https://www.ibm.com/support/pages/node/6331129"
+        echo "- H2: https://www.h2database.com/html/download.html"
+        echo "- SQLite: https://github.com/xerial/sqlite-jdbc/releases"
+    else
+        printf '%s\n' "${found_drivers[@]}"
+    fi
+}
+
+test_connection() {
+    echo "Testing database connection..." >&2
+    echo "Host: ${DB_HOST}" >&2
+    echo "Port: ${DB_PORT}" >&2
+    echo "Database: ${DB_DATABASE}" >&2
+    echo "User: ${DB_USER}" >&2
+    echo "URL: ${JDBC_URL}" >&2
+    echo "Driver: ${JDBC_DRIVER_CLASS}" >&2
+    
+    local test_query="SELECT 1"
+    execute_query "$test_query" "text" > /dev/null
+    echo "Connection successful!" >&2
+}
+
+load_env() {
+    if [[ ! -f "$ENV_FILE" ]]; then
+        echo "Warning: .env file not found at $ENV_FILE" >&2
+        echo "You can specify connection details via command line options" >&2
+    else
+        set -a
+        # shellcheck source=/dev/null
+        source "$ENV_FILE"
+        set +a
+    fi
+    
+    # Override with command line arguments if provided
+    DB_HOST="${CLI_HOST:-${DB_HOST:-localhost}}"
+    DB_PORT="${CLI_PORT:-${DB_PORT:-}}"
+    DB_DATABASE="${CLI_DATABASE:-${DB_DATABASE:-}}"
+    DB_USER="${CLI_USER:-${DB_USER:-}}"
+    DB_PASSWORD="${CLI_PASSWORD:-${DB_PASSWORD:-}}"
+    
+    # Auto-detect or use specified database type
+    local db_type
+    if [[ -n "${CLI_TYPE:-}" ]]; then
+        db_type="$CLI_TYPE"
+    else
+        db_type=$(detect_database_type)
+        if [[ $? -ne 0 ]]; then
+            echo "Error: Could not auto-detect database type" >&2
+            echo "Please specify DB_TYPE in .env or use -t option" >&2
+            echo "Supported types: mysql, postgresql, oracle, sqlserver, db2, h2, sqlite" >&2
+            exit 1
+        fi
+    fi
+    
+    echo "Using database type: $db_type" >&2
+    configure_database "$db_type"
+    
+    # Find the appropriate driver JAR
+    JAR_FILE=$(find_driver_jar "$DRIVER_JAR")
+    echo "Using driver: $(basename "$JAR_FILE")" >&2
+    
+    # Validate required variables
+    if [[ "$db_type" != "sqlite" ]]; then
+        required_vars=("DB_HOST" "DB_USER" "DB_PASSWORD")
+        for var in "${required_vars[@]}"; do
+            if [[ -z "${!var:-}" ]]; then
+                echo "Error: Required environment variable $var is not set" >&2
+                exit 1
+            fi
+        done
+    fi
+    
+    if [[ -z "${DB_DATABASE:-}" && "$db_type" != "sqlite" ]]; then
+        echo "Error: Database name is required" >&2
+        exit 1
+    fi
+}
+
+execute_query() {
+    local query="$1"
+    local format="$2"
+    local temp_dir temp_java_file
+    
+    check_read_only "$query"
+    
+    temp_dir=$(mktemp -d)
+    temp_java_file="$temp_dir/QueryRunner.java"
+    
+    cat > "$temp_java_file" << EOF
+import java.sql.*;
+import java.util.Scanner;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Map;
+import java.util.HashMap;
+import java.io.StringWriter;
+
+public class QueryRunner {
+    public static void main(String[] args) {
+        String url = System.getenv("JDBC_URL");
+        String user = System.getenv("DB_USER");
+        String password = System.getenv("DB_PASSWORD");
+        String driverClass = System.getenv("JDBC_DRIVER_CLASS");
+        String format = System.getenv("OUTPUT_FORMAT");
+        if (format == null) format = "text";
+        
+        try {
+            Class.forName(driverClass);
+            
+            StringBuilder queryBuilder = new StringBuilder();
+            Scanner scanner = new Scanner(System.in);
+            while (scanner.hasNextLine()) {
+                queryBuilder.append(scanner.nextLine()).append("\n");
+            }
+            scanner.close();
+            
+            String query = queryBuilder.toString().trim();
+            if (query.isEmpty()) {
+                System.err.println("Error: Empty query");
+                System.exit(1);
+            }
+            
+            try (Connection conn = DriverManager.getConnection(url, user, password);
+                 Statement stmt = conn.createStatement();
+                 ResultSet rs = stmt.executeQuery(query)) {
+                
+                ResultSetMetaData metaData = rs.getMetaData();
+                int columnCount = metaData.getColumnCount();
+                List<String> columnNames = new ArrayList<>();
+                for (int i = 1; i <= columnCount; i++) {
+                    columnNames.add(metaData.getColumnName(i));
+                }
+                
+                List<Map<String, Object>> rows = new ArrayList<>();
+                while (rs.next()) {
+                    Map<String, Object> row = new HashMap<>();
+                    for (int i = 1; i <= columnCount; i++) {
+                        Object value = rs.getObject(i);
+                        row.put(columnNames.get(i-1), value);
+                    }
+                    rows.add(row);
+                }
+                
+                switch (format) {
+                    case "json":
+                        outputJson(columnNames, rows);
+                        break;
+                    case "csv":
+                        outputCsv(columnNames, rows);
+                        break;
+                    case "pretty":
+                        outputPretty(columnNames, rows);
+                        break;
+                    case "text":
+                    default:
+                        outputText(columnNames, rows);
+                        break;
+                }
+                
+            } catch (SQLException e) {
+                System.err.println("SQL Error: " + e.getMessage());
+                System.exit(1);
+            }
+            
+        } catch (ClassNotFoundException e) {
+            System.err.println("Error: JDBC driver not found: " + e.getMessage());
+            System.exit(1);
+        }
+    }
+    
+    private static void outputJson(List<String> columnNames, List<Map<String, Object>> rows) {
+        System.out.print("[");
+        for (int i = 0; i < rows.size(); i++) {
+            if (i > 0) System.out.print(",");
+            System.out.print("{");
+            Map<String, Object> row = rows.get(i);
+            boolean first = true;
+            for (String col : columnNames) {
+                if (!first) System.out.print(",");
+                first = false;
+                System.out.print("\"" + col + "\":");
+                Object value = row.get(col);
+                if (value == null) {
+                    System.out.print("null");
+                } else if (value instanceof String) {
+                    System.out.print("\"" + value.toString().replace("\"", "\\\\\"") + "\"");
+                } else if (value instanceof Number) {
+                    System.out.print(value.toString());
+                } else {
+                    System.out.print("\"" + value.toString().replace("\"", "\\\\\"") + "\"");
+                }
+            }
+            System.out.print("}");
+        }
+        System.out.println("]");
+    }
+    
+    private static void outputCsv(List<String> columnNames, List<Map<String, Object>> rows) {
+        for (int i = 0; i < columnNames.size(); i++) {
+            if (i > 0) System.out.print(",");
+            System.out.print("\"" + columnNames.get(i).replace("\"", "\"\"") + "\"");
+        }
+        System.out.println();
+        
+        for (Map<String, Object> row : rows) {
+            for (int i = 0; i < columnNames.size(); i++) {
+                if (i > 0) System.out.print(",");
+                Object value = row.get(columnNames.get(i));
+                if (value == null) {
+                    System.out.print("");
+                } else {
+                    String strValue = value.toString();
+                    System.out.print("\"" + strValue.replace("\"", "\"\"") + "\"");
+                }
+            }
+            System.out.println();
+        }
+    }
+    
+    private static void outputPretty(List<String> columnNames, List<Map<String, Object>> rows) {
+        int[] maxWidths = new int[columnNames.size()];
+        for (int i = 0; i < columnNames.size(); i++) {
+            maxWidths[i] = columnNames.get(i).length();
+        }
+        
+        for (Map<String, Object> row : rows) {
+            for (int i = 0; i < columnNames.size(); i++) {
+                Object value = row.get(columnNames.get(i));
+                String strValue = value != null ? value.toString() : "NULL";
+                maxWidths[i] = Math.max(maxWidths[i], strValue.length());
+            }
+        }
+        
+        String separator = "+";
+        for (int width : maxWidths) {
+            separator += "-".repeat(width + 2) + "+";
+        }
+        System.out.println(separator);
+        
+        System.out.print("|");
+        for (int i = 0; i < columnNames.size(); i++) {
+            System.out.print(" " + String.format("%-" + maxWidths[i] + "s", columnNames.get(i)) + " |");
+        }
+        System.out.println();
+        System.out.println(separator);
+        
+        for (Map<String, Object> row : rows) {
+            System.out.print("|");
+            for (int i = 0; i < columnNames.size(); i++) {
+                Object value = row.get(columnNames.get(i));
+                String strValue = value != null ? value.toString() : "NULL";
+                System.out.print(" " + String.format("%-" + maxWidths[i] + "s", strValue) + " |");
+            }
+            System.out.println();
+        }
+        System.out.println(separator);
+    }
+    
+    private static void outputText(List<String> columnNames, List<Map<String, Object>> rows) {
+        for (int i = 0; i < columnNames.size(); i++) {
+            if (i > 0) System.out.print("\t");
+            System.out.print(columnNames.get(i));
+        }
+        System.out.println();
+        
+        for (Map<String, Object> row : rows) {
+            for (int i = 0; i < columnNames.size(); i++) {
+                if (i > 0) System.out.print("\t");
+                Object value = row.get(columnNames.get(i));
+                System.out.print(value != null ? value.toString() : "NULL");
+            }
+            System.out.println();
+        }
+    }
+}
+EOF
+    
+    trap 'rm -rf "${temp_dir:-}"' EXIT
+    
+    if ! javac "$temp_java_file" 2>&1; then
+        echo "Error: Failed to compile Java code" >&2
+        exit 1
+    fi
+    
+    export OUTPUT_FORMAT="$format"
+    echo -n "$query" | java -cp "$JAR_FILE:$temp_dir" QueryRunner
+}
+
+interactive_mode() {
+    local db_type=$(detect_database_type)
+    echo "Query Runner - Interactive Mode" >&2
+    echo "Database Type: $db_type" >&2
+    if [[ "$db_type" != "sqlite" ]]; then
+        echo "Connected to: ${DB_DATABASE}@${DB_HOST}:${DB_PORT}" >&2
+    else
+        echo "Connected to: ${DB_DATABASE}" >&2
+    fi
+    echo "Enter SQL query (empty line to execute, Ctrl+C to exit):" >&2
+    
+    while true; do
+        echo -n "> " >&2
+        local query=""
+        local line
+        
+        while IFS= read -r line; do
+            if [[ -z "$line" ]]; then
+                break
+            fi
+            query+="$line"$'\n'
+            echo -n "> " >&2
+        done
+        
+        if [[ -z "$query" ]]; then
+            echo "Goodbye!" >&2
+            exit 0
+        fi
+        
+        echo >&2
+        execute_query "$query" "text"
+        echo >&2
+    done
+}
+
+main() {
+    local format="text"
+    local query_file=""
+    local list_drivers_flag=false
+    local test_connection_flag=false
+    
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -f|--format)
+                format="$2"
+                shift 2
+                ;;
+            -t|--type)
+                CLI_TYPE="$2"
+                shift 2
+                ;;
+            -h|--host)
+                CLI_HOST="$2"
+                shift 2
+                ;;
+            -p|--port)
+                CLI_PORT="$2"
+                shift 2
+                ;;
+            -d|--database)
+                CLI_DATABASE="$2"
+                shift 2
+                ;;
+            -u|--user)
+                CLI_USER="$2"
+                shift 2
+                ;;
+            -P|--password)
+                CLI_PASSWORD="$2"
+                shift 2
+                ;;
+            -e|--env-file)
+                ENV_FILE="$2"
+                shift 2
+                ;;
+            --drivers-dir)
+                DRIVERS_DIR="$2"
+                shift 2
+                ;;
+            --list-drivers)
+                list_drivers_flag=true
+                shift
+                ;;
+            --test-connection)
+                test_connection_flag=true
+                shift
+                ;;
+            --help)
+                usage
+                ;;
+            -*)
+                echo "Error: Unknown option $1" >&2
+                usage
+                ;;
+            *)
+                if [[ -n "$query_file" ]]; then
+                    echo "Error: Multiple query files specified" >&2
+                    usage
+                fi
+                query_file="$1"
+                shift
+                ;;
+        esac
+    done
+    
+    case "$format" in
+        text|csv|json|pretty)
+            ;;
+        *)
+            echo "Error: Invalid format '$format'. Must be one of: text, csv, json, pretty" >&2
+            exit 1
+            ;;
+    esac
+    
+    # Handle special flags
+    if [[ "$list_drivers_flag" == true ]]; then
+        list_drivers
+        exit 0
+    fi
+    
+    # Load environment and configure database
+    load_env
+    
+    if [[ "$test_connection_flag" == true ]]; then
+        test_connection
+        exit 0
+    fi
+    
+    # Interactive mode if no query file and no stdin
+    if [[ $# -eq 0 && -z "$query_file" && ! -t 0 ]]; then
+        interactive_mode
+        exit 0
+    fi
+    
+    local query=""
+    
+    if [[ -z "$query_file" ]]; then
+        if [[ -t 0 ]]; then
+            echo "Reading query from stdin (Ctrl+D to finish):" >&2
+        fi
+        query=$(cat)
+    else
+        if [[ ! -f "$query_file" ]]; then
+            echo "Error: Query file not found: $query_file" >&2
+            exit 1
+        fi
+        query=$(cat "$query_file")
+    fi
+    
+    if [[ -z "$query" ]]; then
+        echo "Error: Empty query provided" >&2
+        exit 1
+    fi
+    
+    execute_query "$query" "$format"
+}
+
+main "$@"

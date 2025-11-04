@@ -1,0 +1,26 @@
+# JDBC drivers directory
+# Create this directory and add your JDBC JAR files here
+drivers/
+
+# Environment file with sensitive credentials
+.env
+
+# Temporary files
+*.tmp
+*.temp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Java compiled classes (if any)
+*.class
+
+# Logs
+*.log
