@@ -48,6 +48,7 @@ check_read_only() {
     local normalized_query
     normalized_query=$(echo "$query" | tr '[:upper:]' '[:lower:]' | sed 's/--.*$//' | sed 's/\s\+/ /g' | xargs)
     
+    # Check for dangerous patterns anywhere in the query
     local dangerous_patterns=(
         "insert "
         "update "
@@ -62,17 +63,35 @@ check_read_only() {
         "revoke "
         "commit "
         "rollback "
+        "union "  # Can be used for data extraction
+        "load "   # LOAD DATA INFILE
+        "copy "   # COPY command in PostgreSQL
+        "backup " # BACKUP DATABASE
+        "restore " # RESTORE DATABASE
     )
     
     for pattern in "${dangerous_patterns[@]}"; do
-        if [[ "$normalized_query" =~ ^[[:space:]]*$pattern ]]; then
+        if [[ "$normalized_query" =~ [[:space:]]$pattern ]]; then
             echo "Error: Only read-only queries are allowed. Detected potentially dangerous pattern: $pattern" >&2
             exit 1
         fi
     done
     
-    if [[ ! "$normalized_query" =~ ^[[:space:]]*(select|with|show|describe|explain)[[:space:]] ]]; then
-        echo "Error: Query must start with a read-only operation (SELECT, WITH, SHOW, DESCRIBE, EXPLAIN)" >&2
+    # Check for suspicious comment patterns that might hide malicious code
+    if [[ "$normalized_query" =~ [[:space:]]*/\*.*\*/[[:space:]]* ]]; then
+        echo "Error: Block comments are not allowed for security reasons" >&2
+        exit 1
+    fi
+    
+    # Check for multiple statements (semicolon separation)
+    if [[ "$normalized_query" == *";"* ]]; then
+        echo "Error: Multiple SQL statements are not allowed" >&2
+        exit 1
+    fi
+    
+    # Query must start with a read-only operation
+    if [[ ! "$normalized_query" =~ ^[[:space:]]*(select|with|show|describe|explain|pragma)[[:space:]] ]]; then
+        echo "Error: Query must start with a read-only operation (SELECT, WITH, SHOW, DESCRIBE, EXPLAIN, PRAGMA)" >&2
         exit 1
     fi
 }
@@ -120,7 +139,8 @@ configure_database() {
             DB_PORT="${DB_PORT:-3306}"
             JDBC_DRIVER_CLASS="${JDBC_DRIVER_CLASS:-com.mysql.cj.jdbc.Driver}"
             if [[ -z "${JDBC_URL:-}" ]]; then
-                JDBC_URL="jdbc:mysql://${DB_HOST}:${DB_PORT}/${DB_DATABASE}"
+                local timeout="${DB_TIMEOUT:-30}"
+                JDBC_URL="jdbc:mysql://${DB_HOST}:${DB_PORT}/${DB_DATABASE}?connectTimeout=${timeout}000&socketTimeout=${timeout}000"
             fi
             DRIVER_JAR="${DRIVER_JAR:-mysql-connector-java*.jar}"
             ;;
@@ -128,7 +148,8 @@ configure_database() {
             DB_PORT="${DB_PORT:-5432}"
             JDBC_DRIVER_CLASS="${JDBC_DRIVER_CLASS:-org.postgresql.Driver}"
             if [[ -z "${JDBC_URL:-}" ]]; then
-                JDBC_URL="jdbc:postgresql://${DB_HOST}:${DB_PORT}/${DB_DATABASE}"
+                local timeout="${DB_TIMEOUT:-30}"
+                JDBC_URL="jdbc:postgresql://${DB_HOST}:${DB_PORT}/${DB_DATABASE}?connectTimeout=${timeout}000&socketTimeout=${timeout}000"
             fi
             DRIVER_JAR="${DRIVER_JAR:-postgresql*.jar}"
             ;;
@@ -136,7 +157,8 @@ configure_database() {
             DB_PORT="${DB_PORT:-1521}"
             JDBC_DRIVER_CLASS="${JDBC_DRIVER_CLASS:-oracle.jdbc.OracleDriver}"
             if [[ -z "${JDBC_URL:-}" ]]; then
-                JDBC_URL="jdbc:oracle:thin:@${DB_HOST}:${DB_PORT}:${DB_DATABASE}"
+                local timeout="${DB_TIMEOUT:-30}"
+                JDBC_URL="jdbc:oracle:thin:@${DB_HOST}:${DB_PORT}:${DB_DATABASE}?connectTimeout=${timeout}000"
             fi
             DRIVER_JAR="${DRIVER_JAR:-ojdbc*.jar}"
             ;;
@@ -144,7 +166,8 @@ configure_database() {
             DB_PORT="${DB_PORT:-1433}"
             JDBC_DRIVER_CLASS="${JDBC_DRIVER_CLASS:-com.microsoft.sqlserver.jdbc.SQLServerDriver}"
             if [[ -z "${JDBC_URL:-}" ]]; then
-                JDBC_URL="jdbc:sqlserver://${DB_HOST}:${DB_PORT};databaseName=${DB_DATABASE}"
+                local timeout="${DB_TIMEOUT:-30}"
+                JDBC_URL="jdbc:sqlserver://${DB_HOST}:${DB_PORT};databaseName=${DB_DATABASE};loginTimeout=${timeout};socketTimeout=${timeout}000"
             fi
             DRIVER_JAR="${DRIVER_JAR:-mssql-jdbc*.jar}"
             ;;
@@ -152,7 +175,8 @@ configure_database() {
             DB_PORT="${DB_PORT:-50000}"
             JDBC_DRIVER_CLASS="${JDBC_DRIVER_CLASS:-com.ibm.db2.jcc.DB2Driver}"
             if [[ -z "${JDBC_URL:-}" ]]; then
-                JDBC_URL="jdbc:db2://${DB_HOST}:${DB_PORT}/${DB_DATABASE}"
+                local timeout="${DB_TIMEOUT:-30}"
+                JDBC_URL="jdbc:db2://${DB_HOST}:${DB_PORT}/${DB_DATABASE}:clientProgramName=${timeout};"
             fi
             DRIVER_JAR="${DRIVER_JAR:-db2jcc*.jar jt400*.jar}"
             ;;
@@ -160,7 +184,8 @@ configure_database() {
             DB_PORT="${DB_PORT:-9092}"
             JDBC_DRIVER_CLASS="${JDBC_DRIVER_CLASS:-org.h2.Driver}"
             if [[ -z "${JDBC_URL:-}" ]]; then
-                JDBC_URL="jdbc:h2:tcp://${DB_HOST}:${DB_PORT}/${DB_DATABASE}"
+                local timeout="${DB_TIMEOUT:-30}"
+                JDBC_URL="jdbc:h2:tcp://${DB_HOST}:${DB_PORT}/${DB_DATABASE};loginTimeout=${timeout}"
             fi
             DRIVER_JAR="${DRIVER_JAR:-h2*.jar}"
             ;;
@@ -397,6 +422,8 @@ public class QueryRunner {
                 
             } catch (SQLException e) {
                 System.err.println("SQL Error: " + e.getMessage());
+                System.err.println("SQL State: " + e.getSQLState());
+                System.err.println("Error Code: " + e.getErrorCode());
                 System.exit(1);
             }
             
@@ -404,6 +431,38 @@ public class QueryRunner {
             System.err.println("Error: JDBC driver not found: " + e.getMessage());
             System.exit(1);
         }
+    }
+    
+    private static String escapeJson(String str) {
+        if (str == null) return null;
+        StringBuilder escaped = new StringBuilder();
+        for (char c : str.toCharArray()) {
+            switch (c) {
+                case '"': escaped.append("\\\""); break;
+                case '\\': escaped.append("\\\\"); break;
+                case '\n': escaped.append("\\n"); break;
+                case '\r': escaped.append("\\r"); break;
+                case '\t': escaped.append("\\t"); break;
+                case '\b': escaped.append("\\b"); break;
+                case '\f': escaped.append("\\f"); break;
+                default:
+                    if (c <= '\u001F') {
+                        escaped.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        escaped.append(c);
+                    }
+                    break;
+            }
+        }
+        return escaped.toString();
+    }
+    
+    private static String repeatString(String str, int count) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < count; i++) {
+            sb.append(str);
+        }
+        return sb.toString();
     }
     
     private static void outputJson(List<String> columnNames, List<Map<String, Object>> rows) {
@@ -416,16 +475,14 @@ public class QueryRunner {
             for (String col : columnNames) {
                 if (!first) System.out.print(",");
                 first = false;
-                System.out.print("\"" + col + "\":");
+                System.out.print("\"" + escapeJson(col) + "\":");
                 Object value = row.get(col);
                 if (value == null) {
                     System.out.print("null");
-                } else if (value instanceof String) {
-                    System.out.print("\"" + value.toString().replace("\"", "\\\\\"") + "\"");
-                } else if (value instanceof Number) {
+                } else if (value instanceof Number || value instanceof Boolean) {
                     System.out.print(value.toString());
                 } else {
-                    System.out.print("\"" + value.toString().replace("\"", "\\\\\"") + "\"");
+                    System.out.print("\"" + escapeJson(value.toString()) + "\"");
                 }
             }
             System.out.print("}");
@@ -471,7 +528,7 @@ public class QueryRunner {
         
         String separator = "+";
         for (int width : maxWidths) {
-            separator += "-".repeat(width + 2) + "+";
+            separator += repeatString("-", width + 2) + "+";
         }
         System.out.println(separator);
         
@@ -515,8 +572,10 @@ EOF
     
     trap 'rm -rf "${temp_dir:-}"' EXIT
     
-    if ! javac "$temp_java_file" 2>&1; then
+    if ! javac_output=$(javac "$temp_java_file" 2>&1); then
         echo "Error: Failed to compile Java code" >&2
+        echo "Compilation error details:" >&2
+        echo "$javac_output" >&2
         exit 1
     fi
     
@@ -653,8 +712,8 @@ main() {
         exit 0
     fi
     
-    # Interactive mode if no query file and no stdin
-    if [[ $# -eq 0 && -z "$query_file" && ! -t 0 ]]; then
+    # Interactive mode if no query file and stdin is a terminal
+    if [[ $# -eq 0 && -z "$query_file" && -t 0 ]]; then
         interactive_mode
         exit 0
     fi

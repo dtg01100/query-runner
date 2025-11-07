@@ -38,15 +38,23 @@ Download the appropriate JDBC driver for your database and place it in the `driv
 Copy `.env.example` to `.env` and configure your database settings:
 
 ```bash
-# Database Type (optional - will auto-detect)
-DB_TYPE=mysql
+# Database Type (optional - will auto-detect if not specified)
+# Supported: mysql, postgresql, oracle, sqlserver, db2, h2, sqlite
+DB_TYPE=
 
 # Connection Settings
 DB_HOST=localhost
-DB_PORT=3306
-DB_DATABASE=mydb
-DB_USER=myuser
-DB_PASSWORD=mypassword
+DB_PORT=
+DB_DATABASE=
+DB_USER=
+DB_PASSWORD=
+
+# Optional Settings
+DB_TIMEOUT=30  # Connection timeout in seconds (default: 30)
+
+# JDBC Settings (optional - will be auto-configured based on DB_TYPE)
+JDBC_DRIVER_CLASS=
+JDBC_URL=
 ```
 
 ### Database-Specific Examples
@@ -207,9 +215,15 @@ The tool automatically:
 
 ## Security
 
-- **Read-only enforcement**: Only allows SELECT, WITH, SHOW, DESCRIBE, EXPLAIN queries
-- **SQL injection protection**: Blocks dangerous operations (INSERT, UPDATE, DELETE, DROP, etc.)
+- **Read-only enforcement**: Only allows SELECT, WITH, SHOW, DESCRIBE, EXPLAIN, PRAGMA queries
+- **Enhanced SQL injection protection**: 
+  - Blocks dangerous operations (INSERT, UPDATE, DELETE, DROP, etc.)
+  - Prevents multiple SQL statements via semicolon separation
+  - Blocks block comments that could hide malicious code
+  - Detects dangerous patterns anywhere in the query
+- **Secure JSON output**: Proper escaping prevents injection attacks
 - **No password logging**: Passwords are never logged or displayed
+- **Connection timeouts**: Configurable timeouts prevent indefinite hangs (default: 30s)
 
 ## Examples
 
@@ -277,13 +291,32 @@ export QUERY_RUNNER_DEBUG=1
 ./query_runner query.sql
 ```
 
+### Connection Timeout
+
+Configure connection timeout to prevent indefinite hangs:
+```bash
+# Set timeout to 60 seconds
+DB_TIMEOUT=60 ./query_runner query.sql
+
+# Or set in .env file
+echo "DB_TIMEOUT=60" >> .env
+```
+
 ## Contributing
 
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
+4. Test with `bash -n query_runner` (syntax check)
+5. Test with `./query_runner --test-connection` (integration test)
+6. Submit a pull request
+
+### Development Guidelines
+
+- Follow the code style guidelines in `AGENTS.md`
+- Ensure all security checks pass
+- Test with multiple database types if applicable
+- Maintain backward compatibility
 
 ## License
 
