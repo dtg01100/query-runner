@@ -383,9 +383,9 @@ public class QueryRunner {
                 System.exit(1);
             }
             
-            try (Connection conn = DriverManager.getConnection(url, user, password);
+            try (Connection conn = DriverManager.getConnection(url, user != null ? user : "", password != null ? password : "");
                  Statement stmt = conn.createStatement();
-                 ResultSet rs = stmt.executeQuery(query)) {
+                  ResultSet rs = stmt.executeQuery(query)) {
                 
                 ResultSetMetaData metaData = rs.getMetaData();
                 int columnCount = metaData.getColumnCount();
@@ -394,29 +394,28 @@ public class QueryRunner {
                     columnNames.add(metaData.getColumnName(i));
                 }
                 
-                List<Map<String, Object>> rows = new ArrayList<>();
-                while (rs.next()) {
-                    Map<String, Object> row = new HashMap<>();
-                    for (int i = 1; i <= columnCount; i++) {
-                        Object value = rs.getObject(i);
-                        row.put(columnNames.get(i-1), value);
-                    }
-                    rows.add(row);
-                }
-                
                 switch (format) {
                     case "json":
-                        outputJson(columnNames, rows);
+                        outputJsonStream(columnNames, rs);
                         break;
                     case "csv":
-                        outputCsv(columnNames, rows);
+                        outputCsvStream(columnNames, rs);
                         break;
                     case "pretty":
+                        // Pretty format needs two passes, so collect data first
+                        List<Map<String, Object>> rows = new ArrayList<>();
+                        while (rs.next()) {
+                            Map<String, Object> row = new HashMap<>();
+                            for (int i = 1; i <= columnCount; i++) {
+                                row.put(columnNames.get(i-1), rs.getObject(i));
+                            }
+                            rows.add(row);
+                        }
                         outputPretty(columnNames, rows);
                         break;
                     case "text":
                     default:
-                        outputText(columnNames, rows);
+                        outputTextStream(columnNames, rs);
                         break;
                 }
                 
@@ -438,16 +437,16 @@ public class QueryRunner {
         StringBuilder escaped = new StringBuilder();
         for (char c : str.toCharArray()) {
             switch (c) {
-                case '"': escaped.append("\\\""); break;
-                case '\\': escaped.append("\\\\"); break;
-                case '\n': escaped.append("\\n"); break;
-                case '\r': escaped.append("\\r"); break;
-                case '\t': escaped.append("\\t"); break;
-                case '\b': escaped.append("\\b"); break;
-                case '\f': escaped.append("\\f"); break;
+                case '"': escaped.append("\\\\\""); break;
+                case '\\\\': escaped.append("\\\\\\\\"); break;
+                case '\\n': escaped.append("\\\\n"); break;
+                case '\\r': escaped.append("\\\\r"); break;
+                case '\\t': escaped.append("\\\\t"); break;
+                case '\\b': escaped.append("\\\\b"); break;
+                case '\\f': escaped.append("\\\\f"); break;
                 default:
-                    if (c <= '\u001F') {
-                        escaped.append(String.format("\\u%04x", (int) c));
+                    if (c <= '\\u001F') {
+                        escaped.append(String.format("\\\\\\\\u%04x", (int) c));
                     } else {
                         escaped.append(c);
                     }
@@ -465,18 +464,17 @@ public class QueryRunner {
         return sb.toString();
     }
     
-    private static void outputJson(List<String> columnNames, List<Map<String, Object>> rows) {
+    private static void outputJsonStream(List<String> columnNames, ResultSet rs) throws SQLException {
         System.out.print("[");
-        for (int i = 0; i < rows.size(); i++) {
-            if (i > 0) System.out.print(",");
+        boolean first = true;
+        while (rs.next()) {
+            if (!first) System.out.print(",");
+            first = false;
             System.out.print("{");
-            Map<String, Object> row = rows.get(i);
-            boolean first = true;
-            for (String col : columnNames) {
-                if (!first) System.out.print(",");
-                first = false;
-                System.out.print("\"" + escapeJson(col) + "\":");
-                Object value = row.get(col);
+            for (int i = 0; i < columnNames.size(); i++) {
+                if (i > 0) System.out.print(",");
+                System.out.print("\"" + escapeJson(columnNames.get(i)) + "\":");
+                Object value = rs.getObject(i + 1);
                 if (value == null) {
                     System.out.print("null");
                 } else if (value instanceof Number || value instanceof Boolean) {
@@ -490,23 +488,91 @@ public class QueryRunner {
         System.out.println("]");
     }
     
-    private static void outputCsv(List<String> columnNames, List<Map<String, Object>> rows) {
+    private static void outputCsvStream(List<String> columnNames, ResultSet rs) throws SQLException {
+        // Output header
         for (int i = 0; i < columnNames.size(); i++) {
             if (i > 0) System.out.print(",");
             System.out.print("\"" + columnNames.get(i).replace("\"", "\"\"") + "\"");
         }
         System.out.println();
         
-        for (Map<String, Object> row : rows) {
+        // Stream rows
+        while (rs.next()) {
             for (int i = 0; i < columnNames.size(); i++) {
                 if (i > 0) System.out.print(",");
-                Object value = row.get(columnNames.get(i));
+                Object value = rs.getObject(i + 1);
                 if (value == null) {
                     System.out.print("");
                 } else {
                     String strValue = value.toString();
                     System.out.print("\"" + strValue.replace("\"", "\"\"") + "\"");
                 }
+            }
+            System.out.println();
+        }
+    }
+    
+    private static void outputPrettyStream(List<String> columnNames, ResultSet rs) throws SQLException {
+        // First pass: calculate column widths
+        int[] maxWidths = new int[columnNames.size()];
+        for (int i = 0; i < columnNames.size(); i++) {
+            maxWidths[i] = columnNames.get(i).length();
+        }
+        
+        // Save current position to return later
+        rs.beforeFirst();
+        while (rs.next()) {
+            for (int i = 0; i < columnNames.size(); i++) {
+                Object value = rs.getObject(i + 1);
+                String strValue = value != null ? value.toString() : "NULL";
+                maxWidths[i] = Math.max(maxWidths[i], strValue.length());
+            }
+        }
+        
+        // Reset to beginning for second pass
+        rs.beforeFirst();
+        
+        // Output header and separator
+        String separator = "+";
+        for (int width : maxWidths) {
+            separator += repeatString("-", width + 2) + "+";
+        }
+        System.out.println(separator);
+        
+        System.out.print("|");
+        for (int i = 0; i < columnNames.size(); i++) {
+            System.out.print(" " + String.format("%-" + maxWidths[i] + "s", columnNames.get(i)) + " |");
+        }
+        System.out.println();
+        System.out.println(separator);
+        
+        // Stream rows with formatting
+        while (rs.next()) {
+            System.out.print("|");
+            for (int i = 0; i < columnNames.size(); i++) {
+                Object value = rs.getObject(i + 1);
+                String strValue = value != null ? value.toString() : "NULL";
+                System.out.print(" " + String.format("%-" + maxWidths[i] + "s", strValue) + " |");
+            }
+            System.out.println();
+        }
+        System.out.println(separator);
+    }
+    
+    private static void outputTextStream(List<String> columnNames, ResultSet rs) throws SQLException {
+        // Output header
+        for (int i = 0; i < columnNames.size(); i++) {
+            if (i > 0) System.out.print("\t");
+            System.out.print(columnNames.get(i));
+        }
+        System.out.println();
+        
+        // Stream rows
+        while (rs.next()) {
+            for (int i = 0; i < columnNames.size(); i++) {
+                if (i > 0) System.out.print("\t");
+                Object value = rs.getObject(i + 1);
+                System.out.print(value != null ? value.toString() : "NULL");
             }
             System.out.println();
         }
@@ -550,23 +616,6 @@ public class QueryRunner {
         }
         System.out.println(separator);
     }
-    
-    private static void outputText(List<String> columnNames, List<Map<String, Object>> rows) {
-        for (int i = 0; i < columnNames.size(); i++) {
-            if (i > 0) System.out.print("\t");
-            System.out.print(columnNames.get(i));
-        }
-        System.out.println();
-        
-        for (Map<String, Object> row : rows) {
-            for (int i = 0; i < columnNames.size(); i++) {
-                if (i > 0) System.out.print("\t");
-                Object value = row.get(columnNames.get(i));
-                System.out.print(value != null ? value.toString() : "NULL");
-            }
-            System.out.println();
-        }
-    }
 }
 EOF
     
@@ -579,8 +628,16 @@ EOF
         exit 1
     fi
     
-    export OUTPUT_FORMAT="$format"
-    echo -n "$query" | java -cp "$JAR_FILE:$temp_dir" QueryRunner
+    local classpath="$JAR_FILE"
+    if [[ -d "$DRIVERS_DIR" ]]; then
+        for jar in "$DRIVERS_DIR"/*.jar; do
+            if [[ -f "$jar" ]]; then
+                classpath="$classpath:$jar"
+            fi
+        done
+    fi
+    export OUTPUT_FORMAT="$format" JDBC_URL JDBC_DRIVER_CLASS DB_USER DB_PASSWORD
+    echo -n "$query" | java -cp "$classpath:$temp_dir" QueryRunner
 }
 
 interactive_mode() {
