@@ -17,18 +17,19 @@ Arguments:
                   If not provided, reads query from stdin.
 
 Options:
-    -f, --format FORMAT        Output format: text, csv, json, pretty (default: text)
-    -t, --type TYPE            Database type: mysql, postgresql, oracle, sqlserver, db2, h2, sqlite (auto-detect if not specified)
-    -h, --host HOST            Database host (overrides .env)
-    -p, --port PORT            Database port (overrides .env)
-    -d, --database DATABASE    Database name (overrides .env)
-    -u, --user USER            Database user (overrides .env)
-    -P, --password PASSWORD    Database password (overrides .env)
-    -e, --env-file FILE        Custom environment file (default: .env)
-    --drivers-dir DIR          Directory containing JDBC drivers (default: ./drivers)
-    --list-drivers             List available database drivers and exit
-    --test-connection          Test database connection and exit
-    -h, --help                 Show this help message
+    -f, --format FORMAT     Output format: text, csv, json, pretty
+    -t, --type TYPE         Database type: mysql, postgresql, oracle, sqlserver,
+                           db2, h2, sqlite (auto-detect if not specified)
+    -h, --host HOST         Database host (overrides .env)
+    -p, --port PORT         Database port (overrides .env)
+    -d, --database DATABASE Database name (overrides .env)
+    -u, --user USER         Database user (overrides .env)
+    -P, --password PASSWORD Database password (overrides .env)
+    -e, --env-file FILE     Custom environment file (default: .env)
+    --drivers-dir DIR       JDBC drivers directory (default: ./drivers)
+    --list-drivers          List available database drivers and exit
+    --test-connection       Test database connection and exit
+    -h, --help              Show this help message
 
 Examples:
     echo "SELECT * FROM users LIMIT 10" | $(basename "$0")
@@ -37,7 +38,8 @@ Examples:
     $(basename "$0") --test-connection
 
 Environment:
-    Uses .env file for database connection settings. Autoconfigures based on DB_TYPE.
+    Uses .env file for database connection settings.
+    Autoconfigures based on DB_TYPE.
     Supported types: mysql, postgresql, oracle, sqlserver, db2, h2, sqlite
 EOF
     exit 1
