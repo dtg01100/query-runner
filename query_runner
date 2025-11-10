@@ -681,6 +681,7 @@ main() {
     local query_file=""
     local list_drivers_flag=false
     local test_connection_flag=false
+    local original_arg_count=$#
     
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -746,6 +747,11 @@ main() {
         esac
     done
     
+    # Show help if no arguments provided and no special flags set
+    if [[ $original_arg_count -eq 0 && "$list_drivers_flag" == false && "$test_connection_flag" == false ]]; then
+        usage
+    fi
+    
     case "$format" in
         text|csv|json|pretty)
             ;;
@@ -791,8 +797,12 @@ main() {
     fi
     
     if [[ -z "$query" ]]; then
-        echo "Error: Empty query provided" >&2
-        exit 1
+        if [[ $# -eq 0 ]]; then
+            usage
+        else
+            echo "Error: Empty query provided" >&2
+            exit 1
+        fi
     fi
     
     execute_query "$query" "$format"
