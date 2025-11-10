@@ -80,6 +80,7 @@ JDBC_URL=
 ### Database-Specific Examples
 
 #### MySQL
+
 ```bash
 DB_TYPE=mysql
 DB_HOST=localhost
@@ -90,6 +91,7 @@ DB_PASSWORD=mypassword
 ```
 
 #### PostgreSQL
+
 ```bash
 DB_TYPE=postgresql
 DB_HOST=localhost
@@ -100,6 +102,7 @@ DB_PASSWORD=mypassword
 ```
 
 #### DB2/AS400
+
 ```bash
 DB_TYPE=db2
 DB_HOST=localhost
@@ -110,6 +113,7 @@ DB_PASSWORD=mypassword
 ```
 
 #### SQLite
+
 ```bash
 DB_TYPE=sqlite
 DB_DATABASE=/path/to/database.db
@@ -154,27 +158,32 @@ Options:
 ### Advanced Usage
 
 #### Override Connection Settings
+
 ```bash
 ./query_runner -t postgresql --host localhost --port 5432 -d mydb -u user -P pass query.sql
 ```
 
 #### List Available Drivers
+
 ```bash
 ./query_runner --list-drivers
 ```
 
 #### Test Connection
+
 ```bash
 ./query_runner --test-connection
 ```
 
 #### Interactive Mode
+
 ```bash
 ./query_runner
 # Then enter queries interactively
 ```
 
 #### Custom Environment File
+
 ```bash
 ./query_runner -e production.env query.sql
 ```
@@ -182,15 +191,19 @@ Options:
 ## Output Formats
 
 ### Text (default)
+
 Tab-separated values with headers:
-```
+
+```text
 id    name    email
 1     John    john@example.com
 2     Jane    jane@example.com
 ```
 
 ### CSV
+
 Comma-separated values with proper quoting:
+
 ```csv
 "id","name","email"
 "1","John","john@example.com"
@@ -198,14 +211,18 @@ Comma-separated values with proper quoting:
 ```
 
 ### JSON
+
 Array of objects:
+
 ```json
 [{"id":1,"name":"John","email":"john@example.com"},{"id":2,"name":"Jane","email":"jane@example.com"}]
 ```
 
 ### Pretty
+
 Formatted table with borders:
-```
+
+```text
 +----+------+-------------------+
 | id | name | email             |
 +----+------+-------------------+
@@ -245,7 +262,7 @@ The tool automatically:
 ## Security
 
 - **Read-only enforcement**: Only allows SELECT, WITH, SHOW, DESCRIBE, EXPLAIN, PRAGMA queries
-- **Enhanced SQL injection protection**: 
+- **Enhanced SQL injection protection**:
   - Blocks dangerous operations (INSERT, UPDATE, DELETE, DROP, etc.)
   - Prevents multiple SQL statements via semicolon separation
   - Blocks block comments that could hide malicious code
@@ -257,6 +274,7 @@ The tool automatically:
 ## Examples
 
 ### Quick Start with Demo
+
 ```bash
 # Set up SQLite demo with sample data
 ./setup_sqlite_demo.sh
@@ -270,6 +288,7 @@ echo "SELECT department, COUNT(*) as count FROM employees GROUP BY department" |
 ```
 
 ### Quick Start with Your Database
+
 ```bash
 # 1. Set up environment
 cp .env.example .env
@@ -286,6 +305,7 @@ echo "SELECT version()" | ./query_runner
 ```
 
 ### Database Migration
+
 ```bash
 # Export data from MySQL
 ./query_runner -t mysql -f csv "SELECT * FROM users" > users.csv
@@ -295,6 +315,7 @@ psql -c "\copy users FROM users.csv WITH CSV HEADER"
 ```
 
 ### Monitoring
+
 ```bash
 # Check database connections
 ./query_runner -t postgresql "SELECT count(*) FROM pg_stat_activity"
@@ -308,18 +329,21 @@ psql -c "\copy users FROM users.csv WITH CSV HEADER"
 ### Common Issues
 
 1. **Driver not found**
+
    ```bash
    ./query_runner --list-drivers
    # Ensure the appropriate JAR file is in the drivers/ directory
    ```
 
 2. **Connection failed**
+
    ```bash
    ./query_runner --test-connection
    # Check host, port, database name, and credentials
    ```
 
 3. **Auto-detection failed**
+
    ```bash
    # Explicitly specify database type
    ./query_runner -t mysql query.sql
@@ -328,6 +352,7 @@ psql -c "\copy users FROM users.csv WITH CSV HEADER"
 ### Debug Mode
 
 Set environment variable for verbose output:
+
 ```bash
 export QUERY_RUNNER_DEBUG=1
 ./query_runner query.sql
@@ -336,6 +361,7 @@ export QUERY_RUNNER_DEBUG=1
 ### Connection Timeout
 
 Configure connection timeout to prevent indefinite hangs:
+
 ```bash
 # Set timeout to 60 seconds
 DB_TIMEOUT=60 ./query_runner query.sql
@@ -367,6 +393,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## Support
 
 For issues and questions:
+
 - Check the troubleshooting section
 - Review the examples
 - Open an issue on the project repository
