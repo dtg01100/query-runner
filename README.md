@@ -7,10 +7,12 @@ A universal JDBC query runner that auto-configures for multiple database types w
 - **Multi-database support**: MySQL, PostgreSQL, Oracle, SQL Server, DB2, H2, SQLite
 - **Autoconfiguration**: Automatically detects database type and configures drivers
 - **Multiple output formats**: Text, CSV, JSON, Pretty tables
+- **Memory-efficient streaming**: Process large result sets without loading everything into memory
 - **Flexible configuration**: Environment variables, command-line overrides
 - **Interactive mode**: Run queries interactively
 - **Connection testing**: Verify database connectivity
 - **Read-only safety**: Blocks potentially dangerous SQL operations
+- **Demo setup**: Quick SQLite demo with sample data included
 
 ## Installation
 
@@ -30,6 +32,24 @@ Download the appropriate JDBC driver for your database and place it in the `driv
 - **DB2**: [IBM Toolbox for Java (JTOpen)](https://github.com/IBM/JTOpen) or search for "jt400.jar"
 - **H2**: [H2 Database Engine](https://www.h2database.com/html/download.html)
 - **SQLite**: [SQLite JDBC Driver](https://github.com/xerial/sqlite-jdbc/releases)
+
+## Quick Demo Setup
+
+For a quick start with SQLite, use the included demo setup script:
+
+```bash
+# Set up SQLite demo with sample data
+./setup_sqlite_demo.sh
+
+# Test the connection
+./query_runner --test-connection
+
+# Run sample queries
+echo "SELECT * FROM employees LIMIT 5" | ./query_runner
+echo "SELECT department, COUNT(*) as count FROM employees GROUP BY department" | ./query_runner -f pretty
+```
+
+The demo creates a `demo.db` file with sample employee data for testing.
 
 ## Configuration
 
@@ -194,6 +214,15 @@ Formatted table with borders:
 +----+------+-------------------+
 ```
 
+## Memory-Efficient Streaming
+
+The query runner uses streaming output to handle large result sets efficiently:
+
+- **Constant memory usage**: Processes rows one at a time instead of loading all results into memory
+- **Immediate output**: Results start displaying as soon as the first row is available
+- **Large dataset support**: Can handle millions of rows without memory issues
+- **Format agnostic**: Streaming works with all output formats (text, CSV, JSON, pretty)
+
 ## Autoconfiguration
 
 The tool automatically:
@@ -227,7 +256,20 @@ The tool automatically:
 
 ## Examples
 
-### Quick Start
+### Quick Start with Demo
+```bash
+# Set up SQLite demo with sample data
+./setup_sqlite_demo.sh
+
+# Test connection
+./query_runner --test-connection
+
+# Run sample queries
+echo "SELECT * FROM employees LIMIT 5" | ./query_runner
+echo "SELECT department, COUNT(*) as count FROM employees GROUP BY department" | ./query_runner -f pretty
+```
+
+### Quick Start with Your Database
 ```bash
 # 1. Set up environment
 cp .env.example .env
