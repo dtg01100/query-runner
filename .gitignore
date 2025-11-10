@@ -5,6 +5,15 @@ drivers/
 # Environment file with sensitive credentials
 .env
 
+# SQLite demo database and related files
+demo.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# JAR files (in case they're placed elsewhere)
+*.jar
+
 # Temporary files
 *.tmp
 *.temp
