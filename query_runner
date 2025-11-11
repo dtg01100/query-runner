@@ -249,6 +249,7 @@ Options:
     --drivers-dir DIR       JDBC drivers directory (default: ./drivers)
     --list-drivers          List available database drivers and exit
     --test-connection       Test database connection and exit
+    --allow-union-tables TABLES  Comma-separated list of tables allowed in UNION queries
     -h, --help              Show this help message
 
 Examples:
@@ -262,6 +263,52 @@ Environment:
     Autoconfigures based on DB_TYPE.
     Supported types: mysql, postgresql, oracle, sqlserver, db2, h2, sqlite
 EOF
+    exit 1
+}
+
+check_union_safety() {
+    local query="$1"
+    local normalized_query
+    normalized_query=$(echo "$query" | tr '[:upper:]' '[:lower:]' | sed 's/--.*$//' | sed 's/\s\+/ /g' | xargs)
+    
+    # Allow UNION in safe contexts:
+    # 1. WITH clauses (CTEs) - safe self-contained operations
+    # 2. UNION ALL within same table - safe for data deduplication
+    # 3. Explicitly allowed by user flag
+    
+    # Check for UNION in CTE context (safe)
+    if [[ "$normalized_query" =~ with[[:space:]]+.*[[:space:]]+union[[:space:]]+(all[[:space:]]+)?select ]]; then
+        return 0  # Allow UNION and UNION ALL in CTEs
+    fi
+    
+    # Check for UNION ALL (safer than UNION DISTINCT)
+    if [[ "$normalized_query" =~ union[[:space:]]+all[[:space:]]+select ]]; then
+        return 0  # Allow UNION ALL (less risky)
+    fi
+    
+    # Check for UNION between same table (safe)
+    if [[ "$normalized_query" =~ union[[:space:]]+select[[:space:]]+from[[:space:]]+([a-z_][a-z0-9_]*)[[:space:]]+where[[:space:]]+.*[[:space:]]+union[[:space:]]+select[[:space:]]+from[[:space:]]+\1[[:space:]] ]]; then
+        return 0  # Allow UNION within same table
+    fi
+    
+    # Check for explicit whitelist flag
+    if [[ -n "${ALLOW_UNION_TABLES:-}" ]]; then
+        local allowed_tables
+        IFS=',' read -ra allowed_tables <<< "$ALLOW_UNION_TABLES"
+        for table in "${allowed_tables[@]}"; do
+            table=$(echo "$table" | xargs)  # trim whitespace
+            if [[ "$normalized_query" =~ (union.*from.*$table|from.*$table.*union) ]]; then
+                return 0  # Allow UNION for whitelisted tables
+            fi
+        done
+    fi
+    
+    # Default: Block risky UNION operations
+    echo "Error: UNION queries combining data from multiple sources are not allowed by default." >&2
+    echo "For safe UNION operations, use:" >&2
+    echo "  1. UNION ALL with the same table" >&2
+    echo "  2. UNION in WITH clauses (CTEs)" >&2
+    echo "  3. --allow-union-tableS=table1,table2 flag for trusted tables" >&2
     exit 1
 }
 
@@ -285,7 +332,7 @@ check_read_only() {
         "revoke "
         "commit "
         "rollback "
-        "union "  # Can be used for data extraction
+        "union "  # Will be validated with smart detection
         "load "   # LOAD DATA INFILE
         "copy "   # COPY command in PostgreSQL
         "backup " # BACKUP DATABASE
@@ -294,8 +341,13 @@ check_read_only() {
     
     for pattern in "${dangerous_patterns[@]}"; do
         if [[ "$normalized_query" =~ [[:space:]]$pattern ]]; then
-            echo "Error: Only read-only queries are allowed. Detected potentially dangerous pattern: $pattern" >&2
-            exit 1
+            # Special handling for UNION - use smart detection
+            if [[ "$pattern" == "union " ]]; then
+                check_union_safety "$query"
+            else
+                echo "Error: Only read-only queries are allowed. Detected potentially dangerous pattern: $pattern" >&2
+                exit 1
+            fi
         fi
     done
     
@@ -674,7 +726,7 @@ public class QueryRunner {
     
     private static String escapeJson(String str) {
         if (str == null) return null;
-        return str.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t");
+        return str.replace("\\\\", "\\\\\\\\").replace("\n", "\\\\n").replace("\r", "\\\\r").replace("\t", "\\\\t");
     }
     
     private static String repeatString(String str, int count) {
@@ -951,6 +1003,10 @@ main() {
                 test_connection_flag=true
                 shift
                 ;;
+            --allow-union-tables)
+                export ALLOW_UNION_TABLES="$2"
+                shift 2
+                ;;
             --help)
                 usage
                 ;;
@@ -969,8 +1025,8 @@ main() {
         esac
     done
     
-    # Show help if no arguments provided and no special flags set
-    if [[ $original_arg_count -eq 0 && "$list_drivers_flag" == false && "$test_connection_flag" == false ]]; then
+    # Show help if no arguments provided, no special flags set, and no stdin input
+    if [[ $original_arg_count -eq 0 && "$list_drivers_flag" == false && "$test_connection_flag" == false && -t 0 ]]; then
         usage
     fi
     

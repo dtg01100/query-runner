@@ -14,3 +14,5 @@
 - Error handling: Check return codes, provide meaningful error messages
 - Temp files: Use `mktemp`, cleanup with `trap`, avoid shell injection
 - Output: Support text/csv/json/pretty formats, handle null values consistently
+- Performance: Use caching for Java compilation, optimize classpath building, lazy load drivers
+- UNION Security: Implement smart detection, allow safe patterns, block risky cross-table operations
