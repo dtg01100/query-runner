@@ -31,5 +31,12 @@ Thumbs.db
 # Java compiled classes (if any)
 *.class
 
+# Query runner performance cache and pre-compiled files
+# - Cache directory for compiled Java classes (~/.query_runner/cache/)
+# - Pre-compiled class hash validation (.query_runner_hash)
+.query_runner/
+.cache/
+~/.query_runner/
+
 # Logs
 *.log

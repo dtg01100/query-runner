@@ -2,9 +2,229 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/.env"
 DRIVERS_DIR="$SCRIPT_DIR/drivers"
+CACHE_DIR="$HOME/.query_runner/cache"
+
+# Cache management functions
+init_cache() {
+    [[ -d "$CACHE_DIR" ]] || mkdir -p "$CACHE_DIR"
+}
+
+get_source_hash() {
+    # Hash of the query_runner script itself
+    md5sum "$0" | cut -d' ' -f1
+}
+
+get_drivers_hash() {
+    # Hash of all JAR files in drivers directory
+    local drivers_hash=""
+    if [[ -d "$DRIVERS_DIR" ]]; then
+        drivers_hash=$(find "$DRIVERS_DIR" -name "*.jar" -type f -exec md5sum {} \; | sort | md5sum | cut -d' ' -f1)
+    fi
+    echo "$drivers_hash"
+}
+
+get_cache_key() {
+    local source_hash
+    local drivers_hash
+    source_hash=$(get_source_hash)
+    drivers_hash=$(get_drivers_hash)
+    echo "${source_hash}_${drivers_hash}"
+}
+
+get_cache_dir_for_key() {
+    local cache_key="$1"
+    echo "$CACHE_DIR/$cache_key"
+}
+
+is_cache_valid() {
+    local cache_key="$1"
+    local cache_path
+    cache_path=$(get_cache_dir_for_key "$cache_key")
+    
+    [[ -d "$cache_path" ]] || return 1
+    [[ -f "$cache_path/QueryRunner.class" ]] || return 1
+    [[ -f "$cache_path/metadata.json" ]] || return 1
+    
+    # Check if cache is not too old (24 hours)
+    local cache_age
+    cache_age=$(find "$cache_path" -maxdepth 1 -type f -mtime +1 | wc -l)
+    [[ $cache_age -eq 0 ]] || return 1
+    
+    return 0
+}
+
+save_to_cache() {
+    local cache_key="$1"
+    local temp_dir="$2"
+    local cache_path
+    cache_path=$(get_cache_dir_for_key "$cache_key")
+    
+    # Create cache directory
+    mkdir -p "$cache_path"
+    
+    # Copy compiled class file
+    cp "$temp_dir/QueryRunner.class" "$cache_path/"
+    
+    # Save metadata
+    cat > "$cache_path/metadata.json" << EOF
+{
+    "source_hash": "$(get_source_hash)",
+    "drivers_hash": "$(get_drivers_hash)",
+    "created_at": "$(date -Iseconds)",
+    "query_runner_version": "1.0"
+}
+EOF
+}
+
+load_from_cache() {
+    local cache_key="$1"
+    local cache_path
+    cache_path=$(get_cache_dir_for_key "$cache_key")
+    echo "$cache_path/QueryRunner.class"
+}
+
+cleanup_old_cache() {
+    # Remove cache directories older than 7 days
+    find "$CACHE_DIR" -maxdepth 1 -type d -mtime +7 -exec rm -rf {} \; 2>/dev/null || true
+}
+
+get_classpath_cache_key() {
+    # Generate cache key based on drivers directory contents and timestamps
+    local drivers_info=""
+    if [[ -d "$DRIVERS_DIR" ]]; then
+        drivers_info=$(find "$DRIVERS_DIR" -name "*.jar" -type f -printf "%p|%T@\n" 2>/dev/null | sort | md5sum | cut -d' ' -f1)
+    fi
+    echo "classpath_${drivers_info}"
+}
+
+get_cached_classpath() {
+    local cache_key="$1"
+    local cache_file="$CACHE_DIR/${cache_key}.classpath"
+    
+    if [[ -f "$cache_file" ]]; then
+        # Check if cache is still valid (drivers haven't changed)
+        local current_key
+        current_key=$(get_classpath_cache_key)
+        if [[ "$cache_key" == "$current_key" ]]; then
+            cat "$cache_file"
+            return 0
+        fi
+    fi
+    
+    return 1
+}
+
+save_classpath_cache() {
+    local cache_key="$1"
+    local classpath="$2"
+    local cache_file="$CACHE_DIR/${cache_key}.classpath"
+    echo "$classpath" > "$cache_file"
+}
+
+build_classpath() {
+    local jar_file="$1"
+    local cache_key
+    cache_key=$(get_classpath_cache_key)
+    
+    # Try to get from cache first
+    local cached_classpath
+    if cached_classpath=$(get_cached_classpath "$cache_key"); then
+        echo "$cached_classpath:$jar_file"
+        return 0
+    fi
+    
+    # Build classpath from scratch with lazy loading
+    local classpath="$jar_file"
+    local db_type
+    db_type=$(detect_database_type)
+    
+    if [[ -d "$DRIVERS_DIR" ]]; then
+        case "$db_type" in
+            "mysql")
+                for jar in "$DRIVERS_DIR"/*mysql*.jar; do
+                    [[ -f "$jar" ]] && classpath="$classpath:$jar"
+                done
+                ;;
+            "postgresql")
+                for jar in "$DRIVERS_DIR"/*postgresql*.jar; do
+                    [[ -f "$jar" ]] && classpath="$classpath:$jar"
+                done
+                ;;
+            "oracle")
+                for jar in "$DRIVERS_DIR"/*oracle*.jar; do
+                    [[ -f "$jar" ]] && classpath="$classpath:$jar"
+                done
+                ;;
+            "sqlserver")
+                for jar in "$DRIVERS_DIR"/*sqlserver*.jar "$DRIVERS_DIR"/*mssql*.jar; do
+                    [[ -f "$jar" ]] && classpath="$classpath:$jar"
+                done
+                ;;
+            "db2")
+                for jar in "$DRIVERS_DIR"/*db2*.jar "$DRIVERS_DIR"/*jt400*.jar; do
+                    [[ -f "$jar" ]] && classpath="$classpath:$jar"
+                done
+                ;;
+            "h2")
+                for jar in "$DRIVERS_DIR"/*h2*.jar; do
+                    [[ -f "$jar" ]] && classpath="$classpath:$jar"
+                done
+                ;;
+            "sqlite")
+                for jar in "$DRIVERS_DIR"/*sqlite*.jar; do
+                    [[ -f "$jar" ]] && classpath="$classpath:$jar"
+                done
+                ;;
+            *)
+                # Fallback: include all JARs
+                for jar in "$DRIVERS_DIR"/*.jar; do
+                    [[ -f "$jar" ]] && classpath="$classpath:$jar"
+                done
+                ;;
+        esac
+        
+        # Always include SLF4J dependencies if present
+        for jar in "$DRIVERS_DIR"/slf4j*.jar; do
+            [[ -f "$jar" ]] && classpath="$classpath:$jar"
+        done
+    fi
+    
+    # Save to cache
+    save_classpath_cache "$cache_key" "$classpath"
+    
+    echo "$classpath"
+}
+
+get_precompiled_class() {
+    # Check for pre-compiled QueryRunner.class in script directory
+    local precompiled="$SCRIPT_DIR/QueryRunner.class"
+    if [[ -f "$precompiled" ]]; then
+        # Check if it's compatible with current script
+        local script_hash
+        script_hash=$(get_source_hash)
+        local precompiled_hash_file="$SCRIPT_DIR/.query_runner_hash"
+        
+        if [[ -f "$precompiled_hash_file" ]]; then
+            local stored_hash
+            stored_hash=$(cat "$precompiled_hash_file")
+            if [[ "$script_hash" == "$stored_hash" ]]; then
+                echo "$precompiled"
+                return 0
+            fi
+        fi
+    fi
+    
+    return 1
+}
+
+save_precompiled_hash() {
+    local script_hash
+    script_hash=$(get_source_hash)
+    echo "$script_hash" > "$SCRIPT_DIR/.query_runner_hash"
+}
 
 usage() {
     cat << EOF
@@ -344,14 +564,32 @@ load_env() {
 execute_query() {
     local query="$1"
     local format="$2"
-    local temp_dir temp_java_file
+    local temp_dir temp_java_file cache_key cached_class_file
     
     check_read_only "$query"
     
-    temp_dir=$(mktemp -d)
-    temp_java_file="$temp_dir/QueryRunner.java"
+    # Check for pre-compiled class first
+    local precompiled_class
+    local use_precompiled=false
     
-    cat > "$temp_java_file" << EOF
+    if precompiled_class=$(get_precompiled_class); then
+        temp_dir=$(dirname "$precompiled_class")
+        use_precompiled=true
+    else
+        # Initialize cache and check for valid cached compilation
+        init_cache
+        cleanup_old_cache
+        cache_key=$(get_cache_key)
+        
+        if is_cache_valid "$cache_key"; then
+            cached_class_file=$(load_from_cache "$cache_key")
+            temp_dir=$(dirname "$cached_class_file")
+        else
+            # Need to compile
+            temp_dir=$(mktemp -d)
+            temp_java_file="$temp_dir/QueryRunner.java"
+            
+            cat > "$temp_java_file" << EOF
 import java.sql.*;
 import java.util.Scanner;
 import java.util.List;
@@ -385,7 +623,7 @@ public class QueryRunner {
                 System.exit(1);
             }
             
-            try (Connection conn = DriverManager.getConnection(url, user != null ? user : "", password != null ? password : "");
+            try (Connection conn = DriverManager.getConnection(url, user, password);
                  Statement stmt = conn.createStatement();
                   ResultSet rs = stmt.executeQuery(query)) {
                 
@@ -436,26 +674,7 @@ public class QueryRunner {
     
     private static String escapeJson(String str) {
         if (str == null) return null;
-        StringBuilder escaped = new StringBuilder();
-        for (char c : str.toCharArray()) {
-            switch (c) {
-                case '"': escaped.append("\\\\\""); break;
-                case '\\\\': escaped.append("\\\\\\\\"); break;
-                case '\\n': escaped.append("\\\\n"); break;
-                case '\\r': escaped.append("\\\\r"); break;
-                case '\\t': escaped.append("\\\\t"); break;
-                case '\\b': escaped.append("\\\\b"); break;
-                case '\\f': escaped.append("\\\\f"); break;
-                default:
-                    if (c <= '\\u001F') {
-                        escaped.append(String.format("\\\\\\\\u%04x", (int) c));
-                    } else {
-                        escaped.append(c);
-                    }
-                    break;
-            }
-        }
-        return escaped.toString();
+        return str.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t");
     }
     
     private static String repeatString(String str, int count) {
@@ -620,26 +839,27 @@ public class QueryRunner {
     }
 }
 EOF
-    
-    trap 'rm -rf "${temp_dir:-}"' EXIT
-    
-    if ! javac_output=$(javac "$temp_java_file" 2>&1); then
-        echo "Error: Failed to compile Java code" >&2
-        echo "Compilation error details:" >&2
-        echo "$javac_output" >&2
-        exit 1
+        
+        if ! javac_output=$(javac "$temp_java_file" 2>&1); then
+            echo "Error: Failed to compile Java code" >&2
+            echo "Compilation error details:" >&2
+            echo "$javac_output" >&2
+            rm -rf "$temp_dir"
+            exit 1
+        fi
+        
+        # Save to cache for future use
+        save_to_cache "$cache_key" "$temp_dir"
+        
+        # Set trap to cleanup temp directory only for fresh compilations
+        trap 'rm -rf "${temp_dir:-}"' EXIT
+    fi
     fi
     
-    local classpath="$JAR_FILE"
-    if [[ -d "$DRIVERS_DIR" ]]; then
-        for jar in "$DRIVERS_DIR"/*.jar; do
-            if [[ -f "$jar" ]]; then
-                classpath="$classpath:$jar"
-            fi
-        done
-    fi
+    local classpath
+    classpath=$(build_classpath "$JAR_FILE")
     export OUTPUT_FORMAT="$format" JDBC_URL JDBC_DRIVER_CLASS DB_USER DB_PASSWORD
-    echo -n "$query" | java -cp "$classpath:$temp_dir" QueryRunner
+    echo -n "$query" | java --enable-native-access=ALL-UNNAMED -cp "$classpath:$temp_dir" QueryRunner
 }
 
 interactive_mode() {
