@@ -250,6 +250,9 @@ Options:
     --list-drivers          List available database drivers and exit
     --test-connection       Test database connection and exit
     --allow-union-tables TABLES  Comma-separated list of tables allowed in UNION queries
+    --retry-max-attempts N     Maximum number of connection retry attempts (default: 1)
+    --retry-backoff-factor F   Exponential backoff factor for retries (default: 2.0)
+    --retry-initial-delay D    Initial delay in milliseconds before first retry (default: 1000)
     -h, --help              Show this help message
 
 Examples:
@@ -658,26 +661,58 @@ public class QueryRunner {
         String driverClass = System.getenv("JDBC_DRIVER_CLASS");
         String format = System.getenv("OUTPUT_FORMAT");
         if (format == null) format = "text";
-        
+
+        int maxAttempts = Integer.parseInt(System.getenv("RETRY_MAX_ATTEMPTS") != null ? System.getenv("RETRY_MAX_ATTEMPTS") : "1");
+        double backoffFactor = Double.parseDouble(System.getenv("RETRY_BACKOFF_FACTOR") != null ? System.getenv("RETRY_BACKOFF_FACTOR") : "2.0");
+        long initialDelay = Long.parseLong(System.getenv("RETRY_INITIAL_DELAY") != null ? System.getenv("RETRY_INITIAL_DELAY") : "1000");
+
         try {
             Class.forName(driverClass);
-            
+
             StringBuilder queryBuilder = new StringBuilder();
             Scanner scanner = new Scanner(System.in);
             while (scanner.hasNextLine()) {
                 queryBuilder.append(scanner.nextLine()).append("\n");
             }
             scanner.close();
-            
+
             String query = queryBuilder.toString().trim();
             if (query.isEmpty()) {
                 System.err.println("Error: Empty query");
                 System.exit(1);
             }
-            
-            try (Connection conn = DriverManager.getConnection(url, user, password);
-                 Statement stmt = conn.createStatement();
-                  ResultSet rs = stmt.executeQuery(query)) {
+
+            Connection conn = null;
+            SQLException lastException = null;
+            long delay = initialDelay;
+
+            for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+                try {
+                    conn = DriverManager.getConnection(url, user, password);
+                    break; // Success, exit retry loop
+                } catch (SQLException e) {
+                    lastException = e;
+                    if (attempt < maxAttempts) {
+                        System.err.println("Connection attempt " + attempt + " failed: " + e.getMessage() + ". Retrying in " + delay + "ms...");
+                        try {
+                            Thread.sleep(delay);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            throw new RuntimeException("Interrupted during retry delay", ie);
+                        }
+                        delay = (long) (delay * backoffFactor);
+                    }
+                }
+            }
+
+            if (conn == null) {
+                System.err.println("Failed to connect after " + maxAttempts + " attempts");
+                System.err.println("Last error: " + lastException.getMessage());
+                System.exit(1);
+            }
+
+            try (Statement stmt = conn.createStatement();
+                 ResultSet rs = stmt.executeQuery(query)) {
                 
                 ResultSetMetaData metaData = rs.getMetaData();
                 int columnCount = metaData.getColumnCount();
@@ -710,12 +745,20 @@ public class QueryRunner {
                         outputTextStream(columnNames, rs);
                         break;
                 }
-                
+
             } catch (SQLException e) {
                 System.err.println("SQL Error: " + e.getMessage());
                 System.err.println("SQL State: " + e.getSQLState());
                 System.err.println("Error Code: " + e.getErrorCode());
                 System.exit(1);
+            } finally {
+                if (conn != null) {
+                    try {
+                        conn.close();
+                    } catch (SQLException e) {
+                        // Ignore close errors
+                    }
+                }
             }
             
         } catch (ClassNotFoundException e) {
@@ -1005,6 +1048,18 @@ main() {
                 ;;
             --allow-union-tables)
                 export ALLOW_UNION_TABLES="$2"
+                shift 2
+                ;;
+            --retry-max-attempts)
+                export RETRY_MAX_ATTEMPTS="$2"
+                shift 2
+                ;;
+            --retry-backoff-factor)
+                export RETRY_BACKOFF_FACTOR="$2"
+                shift 2
+                ;;
+            --retry-initial-delay)
+                export RETRY_INITIAL_DELAY="$2"
                 shift 2
                 ;;
             --help)
