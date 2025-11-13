@@ -15,6 +15,7 @@ A universal JDBC query runner that auto-configures for multiple database types w
 - **Connection testing**: Verify database connectivity
 - **Read-only safety**: Blocks potentially dangerous SQL operations
 - **Demo setup**: Quick SQLite demo with sample data included
+- **Automatic Java provisioning**: Downloads standalone JDK if system Java is not available
 
 ## Installation
 
@@ -22,6 +23,8 @@ A universal JDBC query runner that auto-configures for multiple database types w
 2. Make it executable: `chmod +x query_runner`
 3. Create a drivers directory: `mkdir drivers`
 4. Download appropriate JDBC drivers and place them in the `drivers/` directory
+
+**Note**: The script automatically downloads a standalone JDK (Java 21) if Java is not available on your system. The JDK is cached in `~/.query_runner/cache/jdk/` for future use.
 
 ### JDBC Drivers Download
 

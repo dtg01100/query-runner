@@ -7,6 +7,10 @@ ENV_FILE="$SCRIPT_DIR/.env"
 DRIVERS_DIR="$SCRIPT_DIR/drivers"
 CACHE_DIR="$HOME/.query_runner/cache"
 
+# Java binaries
+JAVA_BIN=""
+JAVAC_BIN=""
+
 # Cache management functions
 init_cache() {
     [[ -d "$CACHE_DIR" ]] || mkdir -p "$CACHE_DIR"
@@ -89,6 +93,47 @@ load_from_cache() {
 cleanup_old_cache() {
     # Remove cache directories older than 7 days
     find "$CACHE_DIR" -maxdepth 1 -type d -mtime +7 -exec rm -rf {} \; 2>/dev/null || true
+}
+
+check_java_availability() {
+    if command -v java >/dev/null 2>&1 && command -v javac >/dev/null 2>&1; then
+        JAVA_BIN=$(command -v java)
+        JAVAC_BIN=$(command -v javac)
+        return 0
+    fi
+    return 1
+}
+
+download_standalone_jdk() {
+    local java_version="21"
+    local java_url="https://api.adoptium.net/v3/binary/latest/${java_version}/ga/linux/x64/jdk/hotspot/normal/adoptium"
+    local java_archive="$CACHE_DIR/jdk.tar.gz"
+    local java_dir="$CACHE_DIR/jdk"
+
+    if [[ ! -d "$java_dir" ]]; then
+        echo "Downloading standalone JDK..." >&2
+        if ! curl -L -o "$java_archive" "$java_url" 2>/dev/null; then
+            echo "Error: Failed to download JDK from $java_url" >&2
+            exit 1
+        fi
+        mkdir -p "$java_dir"
+        if ! tar -xzf "$java_archive" -C "$java_dir" --strip-components=1 2>/dev/null; then
+            echo "Error: Failed to extract JDK archive" >&2
+            rm -f "$java_archive"
+            exit 1
+        fi
+        rm -f "$java_archive"
+    fi
+
+    JAVA_BIN="$java_dir/bin/java"
+    JAVAC_BIN="$java_dir/bin/javac"
+
+    # Verify the downloaded Java works
+    if ! "$JAVA_BIN" -version >/dev/null 2>&1 || ! "$JAVAC_BIN" -version >/dev/null 2>&1; then
+        echo "Error: Downloaded JDK is not functional" >&2
+        rm -rf "$java_dir"
+        exit 1
+    fi
 }
 
 get_classpath_cache_key() {
@@ -935,7 +980,7 @@ public class QueryRunner {
 }
 EOF
         
-        if ! javac_output=$(javac "$temp_java_file" 2>&1); then
+        if ! javac_output=$("$JAVAC_BIN" "$temp_java_file" 2>&1); then
             echo "Error: Failed to compile Java code" >&2
             echo "Compilation error details:" >&2
             echo "$javac_output" >&2
@@ -954,7 +999,7 @@ EOF
     local classpath
     classpath=$(build_classpath "$JAR_FILE")
     export OUTPUT_FORMAT="$format" JDBC_URL JDBC_DRIVER_CLASS DB_USER DB_PASSWORD
-    echo -n "$query" | java --enable-native-access=ALL-UNNAMED -cp "$classpath:$temp_dir" QueryRunner
+    echo -n "$query" | "$JAVA_BIN" --enable-native-access=ALL-UNNAMED -cp "$classpath:$temp_dir" QueryRunner
 }
 
 interactive_mode() {
@@ -994,6 +1039,12 @@ interactive_mode() {
 }
 
 main() {
+    # Initialize cache and check/setup Java
+    init_cache
+    if ! check_java_availability; then
+        download_standalone_jdk
+    fi
+
     local format="text"
     local query_file=""
     local list_drivers_flag=false
