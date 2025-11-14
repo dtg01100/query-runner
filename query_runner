@@ -47,16 +47,16 @@ is_cache_valid() {
     local cache_key="$1"
     local cache_path
     cache_path=$(get_cache_dir_for_key "$cache_key")
-    
+
     [[ -d "$cache_path" ]] || return 1
     [[ -f "$cache_path/QueryRunner.class" ]] || return 1
     [[ -f "$cache_path/metadata.json" ]] || return 1
-    
+
     # Check if cache is not too old (24 hours)
     local cache_age
     cache_age=$(find "$cache_path" -maxdepth 1 -type f -mtime +1 | wc -l)
     [[ $cache_age -eq 0 ]] || return 1
-    
+
     return 0
 }
 
@@ -65,15 +65,15 @@ save_to_cache() {
     local temp_dir="$2"
     local cache_path
     cache_path=$(get_cache_dir_for_key "$cache_key")
-    
+
     # Create cache directory
     mkdir -p "$cache_path"
-    
+
     # Copy compiled class file
     cp "$temp_dir/QueryRunner.class" "$cache_path/"
-    
+
     # Save metadata
-    cat > "$cache_path/metadata.json" << EOF
+    cat > "$cache_path/metadata.json" << 'EOF'
 {
     "source_hash": "$(get_source_hash)",
     "drivers_hash": "$(get_drivers_hash)",
@@ -111,7 +111,7 @@ download_standalone_jdk() {
     local java_dir="$CACHE_DIR/jdk"
 
     if [[ ! -d "$java_dir" ]]; then
-        echo "Downloading standalone JDK..." >&2
+echo "Downloading standalone JDK..." >&2
         if ! curl -L -o "$java_archive" "$java_url" 2>/dev/null; then
             echo "Error: Failed to download JDK from $java_url" >&2
             exit 1
@@ -130,7 +130,7 @@ download_standalone_jdk() {
 
     # Verify the downloaded Java works
     if ! "$JAVA_BIN" -version >/dev/null 2>&1 || ! "$JAVAC_BIN" -version >/dev/null 2>&1; then
-        echo "Error: Downloaded JDK is not functional" >&2
+echo "Error: Downloaded JDK is not functional" >&2
         rm -rf "$java_dir"
         exit 1
     fi
@@ -148,7 +148,7 @@ get_classpath_cache_key() {
 get_cached_classpath() {
     local cache_key="$1"
     local cache_file="$CACHE_DIR/${cache_key}.classpath"
-    
+
     if [[ -f "$cache_file" ]]; then
         # Check if cache is still valid (drivers haven't changed)
         local current_key
@@ -158,7 +158,7 @@ get_cached_classpath() {
             return 0
         fi
     fi
-    
+
     return 1
 }
 
@@ -173,19 +173,19 @@ build_classpath() {
     local jar_file="$1"
     local cache_key
     cache_key=$(get_classpath_cache_key)
-    
+
     # Try to get from cache first
     local cached_classpath
     if cached_classpath=$(get_cached_classpath "$cache_key"); then
-        echo "$cached_classpath:$jar_file"
+echo "$cached_classpath:$jar_file"
         return 0
     fi
-    
+
     # Build classpath from scratch with lazy loading
     local classpath="$jar_file"
     local db_type
     db_type=$(detect_database_type)
-    
+
     if [[ -d "$DRIVERS_DIR" ]]; then
         case "$db_type" in
             "mysql")
@@ -230,16 +230,16 @@ build_classpath() {
                 done
                 ;;
         esac
-        
+
         # Always include SLF4J dependencies if present
         for jar in "$DRIVERS_DIR"/slf4j*.jar; do
             [[ -f "$jar" ]] && classpath="$classpath:$jar"
         done
     fi
-    
+
     # Save to cache
     save_classpath_cache "$cache_key" "$classpath"
-    
+
     echo "$classpath"
 }
 
@@ -251,7 +251,7 @@ get_precompiled_class() {
         local script_hash
         script_hash=$(get_source_hash)
         local precompiled_hash_file="$SCRIPT_DIR/.query_runner_hash"
-        
+
         if [[ -f "$precompiled_hash_file" ]]; then
             local stored_hash
             stored_hash=$(cat "$precompiled_hash_file")
@@ -261,7 +261,7 @@ get_precompiled_class() {
             fi
         fi
     fi
-    
+
     return 1
 }
 
@@ -272,7 +272,7 @@ save_precompiled_hash() {
 }
 
 usage() {
-    cat << EOF
+    cat << 'EOF'
 Usage: $(basename "$0") [OPTIONS] [QUERY_FILE]
 
 Execute read-only SQL queries using JDBC with autoconfiguration.
@@ -294,6 +294,7 @@ Options:
     --drivers-dir DIR       JDBC drivers directory (default: ./drivers)
     --list-drivers          List available database drivers and exit
     --test-connection       Test database connection and exit
+    --download-driver TYPE  Download JDBC driver for TYPE (mysql, postgresql, h2, sqlite, sqlserver)
     --allow-union-tables TABLES  Comma-separated list of tables allowed in UNION queries
     --retry-max-attempts N     Maximum number of connection retry attempts (default: 1)
     --retry-backoff-factor F   Exponential backoff factor for retries (default: 2.0)
@@ -318,27 +319,27 @@ check_union_safety() {
     local query="$1"
     local normalized_query
     normalized_query=$(echo "$query" | tr '[:upper:]' '[:lower:]' | sed 's/--.*$//' | sed 's/\s\+/ /g' | xargs)
-    
+
     # Allow UNION in safe contexts:
     # 1. WITH clauses (CTEs) - safe self-contained operations
     # 2. UNION ALL within same table - safe for data deduplication
     # 3. Explicitly allowed by user flag
-    
+
     # Check for UNION in CTE context (safe)
     if [[ "$normalized_query" =~ with[[:space:]]+.*[[:space:]]+union[[:space:]]+(all[[:space:]]+)?select ]]; then
         return 0  # Allow UNION and UNION ALL in CTEs
     fi
-    
+
     # Check for UNION ALL (safer than UNION DISTINCT)
     if [[ "$normalized_query" =~ union[[:space:]]+all[[:space:]]+select ]]; then
         return 0  # Allow UNION ALL (less risky)
     fi
-    
+
     # Check for UNION between same table (safe)
     if [[ "$normalized_query" =~ union[[:space:]]+select[[:space:]]+from[[:space:]]+([a-z_][a-z0-9_]*)[[:space:]]+where[[:space:]]+.*[[:space:]]+union[[:space:]]+select[[:space:]]+from[[:space:]]+\1[[:space:]] ]]; then
         return 0  # Allow UNION within same table
     fi
-    
+
     # Check for explicit whitelist flag
     if [[ -n "${ALLOW_UNION_TABLES:-}" ]]; then
         local allowed_tables
@@ -350,7 +351,7 @@ check_union_safety() {
             fi
         done
     fi
-    
+
     # Default: Block risky UNION operations
     echo "Error: UNION queries combining data from multiple sources are not allowed by default." >&2
     echo "For safe UNION operations, use:" >&2
@@ -364,7 +365,7 @@ check_read_only() {
     local query="$1"
     local normalized_query
     normalized_query=$(echo "$query" | tr '[:upper:]' '[:lower:]' | sed 's/--.*$//' | sed 's/\s\+/ /g' | xargs)
-    
+
     # Check for dangerous patterns anywhere in the query
     local dangerous_patterns=(
         "insert "
@@ -386,7 +387,7 @@ check_read_only() {
         "backup " # BACKUP DATABASE
         "restore " # RESTORE DATABASE
     )
-    
+
     for pattern in "${dangerous_patterns[@]}"; do
         if [[ "$normalized_query" =~ [[:space:]]$pattern ]]; then
             # Special handling for UNION - use smart detection
@@ -398,34 +399,34 @@ check_read_only() {
             fi
         fi
     done
-    
+
     # Check for suspicious comment patterns that might hide malicious code
     if [[ "$normalized_query" =~ [[:space:]]*/\*.*\*/[[:space:]]* ]]; then
-        echo "Error: Block comments are not allowed for security reasons" >&2
+echo "Error: Block comments are not allowed for security reasons" >&2
         exit 1
     fi
-    
+
     # Check for multiple statements (semicolon separation)
     if [[ "$normalized_query" == *";"* ]]; then
-        echo "Error: Multiple SQL statements are not allowed" >&2
+echo "Error: Multiple SQL statements are not allowed" >&2
         exit 1
     fi
-    
+
     # Query must start with a read-only operation
     if [[ ! "$normalized_query" =~ ^[[:space:]]*(select|with|show|describe|explain|pragma)[[:space:]] ]]; then
-        echo "Error: Query must start with a read-only operation (SELECT, WITH, SHOW, DESCRIBE, EXPLAIN, PRAGMA)" >&2
+echo "Error: Query must start with a read-only operation (SELECT, WITH, SHOW, DESCRIBE, EXPLAIN, PRAGMA)" >&2
         exit 1
     fi
 }
 
 detect_database_type() {
     local db_type="${DB_TYPE:-}"
-    
+
     if [[ -n "$db_type" ]]; then
-        echo "$db_type"
+echo "$db_type"
         return 0
     fi
-    
+
     # Try to detect from JDBC_URL if available
     if [[ -n "${JDBC_URL:-}" ]]; then
         case "$JDBC_URL" in
@@ -438,7 +439,7 @@ detect_database_type() {
             *sqlite*) echo "sqlite"; return 0 ;;
         esac
     fi
-    
+
     # Try to detect from available drivers
     if [[ -d "$DRIVERS_DIR" ]]; then
         if ls "$DRIVERS_DIR"/*mysql* 1> /dev/null 2>&1; then echo "mysql"; return 0; fi
@@ -449,13 +450,13 @@ detect_database_type() {
         if ls "$DRIVERS_DIR"/*h2* 1> /dev/null 2>&1; then echo "h2"; return 0; fi
         if ls "$DRIVERS_DIR"/*sqlite* 1> /dev/null 2>&1; then echo "sqlite"; return 0; fi
     fi
-    
+
     return 1
 }
 
 configure_database() {
     local db_type="$1"
-    
+
     case "$db_type" in
         mysql)
             DB_PORT="${DB_PORT:-3306}"
@@ -529,7 +530,7 @@ configure_database() {
 find_driver_jar() {
     local driver_pattern="$1"
     local jar_files=()
-    
+
     # Search in drivers directory
     if [[ -d "$DRIVERS_DIR" ]]; then
         for pattern in $driver_pattern; do
@@ -538,18 +539,18 @@ find_driver_jar() {
             done < <(find "$DRIVERS_DIR" -name "$pattern" -type f -print0 2>/dev/null)
         done
     fi
-    
+
     # Search in script directory
     while IFS= read -r -d '' jar; do
         jar_files+=("$jar")
     done < <(find "$SCRIPT_DIR" -name "*.jar" -type f -print0 2>/dev/null)
-    
+
     if [[ ${#jar_files[@]} -eq 0 ]]; then
-        echo "Error: No JDBC driver found matching pattern: $driver_pattern" >&2
-        echo "Please place the appropriate JDBC driver JAR in $DRIVERS_DIR or $SCRIPT_DIR" >&2
+echo "Error: No JDBC driver found matching pattern: $driver_pattern" >&2
+echo "Please place the appropriate JDBC driver JAR in $DRIVERS_DIR or $SCRIPT_DIR" >&2
         exit 1
     fi
-    
+
     # Return the first match
     echo "${jar_files[0]}"
 }
@@ -557,9 +558,9 @@ find_driver_jar() {
 list_drivers() {
     echo "Available database drivers:"
     echo "=========================="
-    
+
     local found_drivers=()
-    
+
     if [[ -d "$DRIVERS_DIR" ]]; then
         while IFS= read -r -d '' jar; do
             local basename
@@ -576,31 +577,67 @@ list_drivers() {
             esac
         done < <(find "$DRIVERS_DIR" -name "*.jar" -type f -print0 2>/dev/null)
     fi
-    
+
     if [[ ${#found_drivers[@]} -eq 0 ]]; then
-        echo "No JDBC drivers found in $DRIVERS_DIR"
-        echo "Download drivers and place them in the drivers directory:"
-        echo "- MySQL: https://dev.mysql.com/downloads/connector/j/"
-        echo "- PostgreSQL: https://jdbc.postgresql.org/download/"
-        echo "- Oracle: https://www.oracle.com/database/technologies/appdev/jdbc-downloads.html"
-        echo "- SQL Server: https://docs.microsoft.com/en-us/sql/connect/jdbc/download-microsoft-jdbc-driver-for-sql-server"
-        echo "- DB2: https://www.ibm.com/support/pages/node/6331129"
-        echo "- H2: https://www.h2database.com/html/download.html"
-        echo "- SQLite: https://github.com/xerial/sqlite-jdbc/releases"
+echo "No JDBC drivers found in $DRIVERS_DIR"
+echo "Download drivers and place them in the drivers directory:"
+echo "- MySQL: https://dev.mysql.com/downloads/connector/j/"
+echo "- PostgreSQL: https://jdbc.postgresql.org/download/"
+echo "- Oracle: https://www.oracle.com/database/technologies/appdev/jdbc-downloads.html"
+echo "- SQL Server: https://docs.microsoft.com/en-us/sql/connect/jdbc/download-microsoft-jdbc-driver-for-sql-server"
+echo "- DB2: https://www.ibm.com/support/pages/node/6331129"
+echo "- H2: https://www.h2database.com/html/download.html"
+echo "- SQLite: https://github.com/xerial/sqlite-jdbc/releases"
     else
         printf '%s\n' "${found_drivers[@]}"
     fi
 }
 
+download_driver() {
+    local type="$1"
+    local url=""
+    local filename=""
+    case "$type" in
+        mysql)
+            url="https://repo1.maven.org/maven2/com/mysql/mysql-connector-j/8.0.33/mysql-connector-j-8.0.33.jar"
+            filename="mysql-connector-j-8.0.33.jar"
+            ;;
+        postgresql)
+            url="https://repo1.maven.org/maven2/org/postgresql/postgresql/42.6.0/postgresql-42.6.0.jar"
+            filename="postgresql-42.6.0.jar"
+            ;;
+        h2)
+            url="https://repo1.maven.org/maven2/com/h2database/h2/2.1.214/h2-2.1.214.jar"
+            filename="h2-2.1.214.jar"
+            ;;
+        sqlite)
+            url="https://repo1.maven.org/maven2/org/xerial/sqlite-jdbc/3.42.0.0/sqlite-jdbc-3.42.0.0.jar"
+            filename="sqlite-jdbc-3.42.0.0.jar"
+            ;;
+        sqlserver)
+            url="https://repo1.maven.org/maven2/com/microsoft/sqlserver/mssql-jdbc/12.4.1.jre11/mssql-jdbc-12.4.1.jre11.jar"
+            filename="mssql-jdbc-12.4.1.jre11.jar"
+            ;;
+        *)
+            echo "Error: Unsupported driver type: $type" >&2
+            exit 1
+            ;;
+    esac
+    mkdir -p "$DRIVERS_DIR"
+    local dest="$DRIVERS_DIR/$filename"
+    if [[ -f "$dest" ]]; then
+        echo "Driver already exists: $dest" >&2
+        return 0
+    fi
+    echo "Downloading $type driver from $url..." >&2
+    if ! curl -L -o "$dest" "$url"; then
+        echo "Error: Failed to download $url" >&2
+        exit 1
+    fi
+    echo "Downloaded $type driver to $dest" >&2
+}
+
 test_connection() {
-    echo "Testing database connection..." >&2
-    echo "Host: ${DB_HOST}" >&2
-    echo "Port: ${DB_PORT}" >&2
-    echo "Database: ${DB_DATABASE}" >&2
-    echo "User: ${DB_USER}" >&2
-    echo "URL: ${JDBC_URL}" >&2
-    echo "Driver: ${JDBC_DRIVER_CLASS}" >&2
-    
     local test_query="SELECT 1"
     execute_query "$test_query" "text" > /dev/null
     echo "Connection successful!" >&2
@@ -608,22 +645,22 @@ test_connection() {
 
 load_env() {
     if [[ ! -f "$ENV_FILE" ]]; then
-        echo "Warning: .env file not found at $ENV_FILE" >&2
-        echo "You can specify connection details via command line options" >&2
+echo "Warning: .env file not found at $ENV_FILE" >&2
+echo "You can specify connection details via command line options" >&2
     else
         set -a
         # shellcheck source=/dev/null
         source "$ENV_FILE"
         set +a
     fi
-    
+
     # Override with command line arguments if provided
     DB_HOST="${CLI_HOST:-${DB_HOST:-localhost}}"
     DB_PORT="${CLI_PORT:-${DB_PORT:-}}"
     DB_DATABASE="${CLI_DATABASE:-${DB_DATABASE:-}}"
     DB_USER="${CLI_USER:-${DB_USER:-}}"
     DB_PASSWORD="${CLI_PASSWORD:-${DB_PASSWORD:-}}"
-    
+
 # Auto-detect or use specified database type
     local db_type
     if [[ -n "${CLI_TYPE:-}" ]]; then
@@ -636,14 +673,14 @@ load_env() {
             exit 1
         fi
     fi
-    
+
     echo "Using database type: $db_type" >&2
     configure_database "$db_type"
-    
+
     # Find the appropriate driver JAR
     JAR_FILE=$(find_driver_jar "$DRIVER_JAR")
     echo "Using driver: $(basename "$JAR_FILE")" >&2
-    
+
     # Validate required variables
     if [[ "$db_type" != "sqlite" ]]; then
         required_vars=("DB_HOST" "DB_USER" "DB_PASSWORD")
@@ -654,9 +691,9 @@ load_env() {
             fi
         done
     fi
-    
+
     if [[ -z "${DB_DATABASE:-}" && "$db_type" != "sqlite" ]]; then
-        echo "Error: Database name is required" >&2
+echo "Error: Database name is required" >&2
         exit 1
     fi
 }
@@ -665,13 +702,13 @@ execute_query() {
     local query="$1"
     local format="$2"
     local temp_dir temp_java_file cache_key cached_class_file
-    
+
     check_read_only "$query"
-    
+
     # Check for pre-compiled class first
     local precompiled_class
     local use_precompiled=false
-    
+
     if precompiled_class=$(get_precompiled_class); then
         temp_dir=$(dirname "$precompiled_class")
         use_precompiled=true
@@ -680,7 +717,7 @@ execute_query() {
         init_cache
         cleanup_old_cache
         cache_key=$(get_cache_key)
-        
+
         if is_cache_valid "$cache_key"; then
             cached_class_file=$(load_from_cache "$cache_key")
             temp_dir=$(dirname "$cached_class_file")
@@ -688,135 +725,79 @@ execute_query() {
             # Need to compile
             temp_dir=$(mktemp -d)
             temp_java_file="$temp_dir/QueryRunner.java"
-            
-            cat > "$temp_java_file" << EOF
+
+cat > "$temp_java_file" << 'EOF'
 import java.sql.*;
-import java.util.Scanner;
-import java.util.List;
-import java.util.ArrayList;
-import java.util.Map;
-import java.util.HashMap;
-import java.io.StringWriter;
+import java.util.*;
 
 public class QueryRunner {
+
     public static void main(String[] args) {
+        String query = "";
+        Scanner scanner = new Scanner(System.in);
+        if (scanner.hasNextLine()) {
+            query = scanner.useDelimiter("\\A").next();
+        }
         String url = System.getenv("JDBC_URL");
+        String driver = System.getenv("JDBC_DRIVER_CLASS");
         String user = System.getenv("DB_USER");
         String password = System.getenv("DB_PASSWORD");
-        String driverClass = System.getenv("JDBC_DRIVER_CLASS");
         String format = System.getenv("OUTPUT_FORMAT");
         if (format == null) format = "text";
-
-        int maxAttempts = Integer.parseInt(System.getenv("RETRY_MAX_ATTEMPTS") != null ? System.getenv("RETRY_MAX_ATTEMPTS") : "1");
-        double backoffFactor = Double.parseDouble(System.getenv("RETRY_BACKOFF_FACTOR") != null ? System.getenv("RETRY_BACKOFF_FACTOR") : "2.0");
-        long initialDelay = Long.parseLong(System.getenv("RETRY_INITIAL_DELAY") != null ? System.getenv("RETRY_INITIAL_DELAY") : "1000");
-
         try {
-            Class.forName(driverClass);
-
-            StringBuilder queryBuilder = new StringBuilder();
-            Scanner scanner = new Scanner(System.in);
-            while (scanner.hasNextLine()) {
-                queryBuilder.append(scanner.nextLine()).append("\n");
+            Class.forName(driver);
+            Connection conn = DriverManager.getConnection(url, user, password);
+            Statement stmt = conn.createStatement();
+            ResultSet rs = stmt.executeQuery(query);
+            ResultSetMetaData meta = rs.getMetaData();
+            int columnCount = meta.getColumnCount();
+            List<String> columnNames = new ArrayList<>();
+            for (int i = 1; i <= columnCount; i++) {
+                columnNames.add(meta.getColumnName(i));
             }
-            scanner.close();
-
-            String query = queryBuilder.toString().trim();
-            if (query.isEmpty()) {
-                System.err.println("Error: Empty query");
-                System.exit(1);
-            }
-
-            Connection conn = null;
-            SQLException lastException = null;
-            long delay = initialDelay;
-
-            for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-                try {
-                    conn = DriverManager.getConnection(url, user, password);
-                    break; // Success, exit retry loop
-                } catch (SQLException e) {
-                    lastException = e;
-                    if (attempt < maxAttempts) {
-                        System.err.println("Connection attempt " + attempt + " failed: " + e.getMessage() + ". Retrying in " + delay + "ms...");
-                        try {
-                            Thread.sleep(delay);
-                        } catch (InterruptedException ie) {
-                            Thread.currentThread().interrupt();
-                            throw new RuntimeException("Interrupted during retry delay", ie);
+            switch (format) {
+                case "pretty":
+                    // For pretty format, load all rows to calculate widths
+                    List<Map<String, Object>> rows = new ArrayList<>();
+                    while (rs.next()) {
+                        Map<String, Object> row = new HashMap<>();
+                        for (int i = 1; i <= columnCount; i++) {
+                            row.put(columnNames.get(i-1), rs.getObject(i));
                         }
-                        delay = (long) (delay * backoffFactor);
+                        rows.add(row);
                     }
-                }
+                    outputPretty(columnNames, rows);
+                    break;
+                case "json":
+                    outputJsonStream(columnNames, rs);
+                    break;
+                case "csv":
+                    outputCsvStream(columnNames, rs);
+                    break;
+                case "text":
+                default:
+                    outputTextStream(columnNames, rs);
+                    break;
             }
-
-            if (conn == null) {
-                System.err.println("Failed to connect after " + maxAttempts + " attempts");
-                System.err.println("Last error: " + lastException.getMessage());
-                System.exit(1);
-            }
-
-            try (Statement stmt = conn.createStatement();
-                 ResultSet rs = stmt.executeQuery(query)) {
-                
-                ResultSetMetaData metaData = rs.getMetaData();
-                int columnCount = metaData.getColumnCount();
-                List<String> columnNames = new ArrayList<>();
-                for (int i = 1; i <= columnCount; i++) {
-                    columnNames.add(metaData.getColumnName(i));
-                }
-                
-                switch (format) {
-                    case "json":
-                        outputJsonStream(columnNames, rs);
-                        break;
-                    case "csv":
-                        outputCsvStream(columnNames, rs);
-                        break;
-                    case "pretty":
-                        // Pretty format needs two passes, so collect data first
-                        List<Map<String, Object>> rows = new ArrayList<>();
-                        while (rs.next()) {
-                            Map<String, Object> row = new HashMap<>();
-                            for (int i = 1; i <= columnCount; i++) {
-                                row.put(columnNames.get(i-1), rs.getObject(i));
-                            }
-                            rows.add(row);
-                        }
-                        outputPretty(columnNames, rows);
-                        break;
-                    case "text":
-                    default:
-                        outputTextStream(columnNames, rs);
-                        break;
-                }
-
-            } catch (SQLException e) {
-                System.err.println("SQL Error: " + e.getMessage());
-                System.err.println("SQL State: " + e.getSQLState());
-                System.err.println("Error Code: " + e.getErrorCode());
-                System.exit(1);
-            } finally {
-                if (conn != null) {
-                    try {
-                        conn.close();
-                    } catch (SQLException e) {
-                        // Ignore close errors
-                    }
-                }
-            }
-            
+            rs.close();
+            stmt.close();
+            conn.close();
+        } catch (SQLException e) {
+            System.err.println("SQL Error: " + e.getMessage());
+            System.err.println("SQL State: " + e.getSQLState());
+            System.err.println("Error Code: " + e.getErrorCode());
+            System.exit(1);
         } catch (ClassNotFoundException e) {
             System.err.println("Error: JDBC driver not found: " + e.getMessage());
             System.exit(1);
         }
     }
-    
+
     private static String escapeJson(String str) {
         if (str == null) return null;
-        return str.replace("\\\\", "\\\\\\\\").replace("\n", "\\\\n").replace("\r", "\\\\r").replace("\t", "\\\\t");
+        return str.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t");
     }
-    
+
     private static String repeatString(String str, int count) {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < count; i++) {
@@ -824,7 +805,7 @@ public class QueryRunner {
         }
         return sb.toString();
     }
-    
+
     private static void outputJsonStream(List<String> columnNames, ResultSet rs) throws SQLException {
         System.out.print("[");
         boolean first = true;
@@ -848,7 +829,7 @@ public class QueryRunner {
         }
         System.out.println("]");
     }
-    
+
     private static void outputCsvStream(List<String> columnNames, ResultSet rs) throws SQLException {
         // Output header
         for (int i = 0; i < columnNames.size(); i++) {
@@ -856,7 +837,6 @@ public class QueryRunner {
             System.out.print("\"" + columnNames.get(i).replace("\"", "\"\"") + "\"");
         }
         System.out.println();
-        
         // Stream rows
         while (rs.next()) {
             for (int i = 0; i < columnNames.size(); i++) {
@@ -872,54 +852,9 @@ public class QueryRunner {
             System.out.println();
         }
     }
-    
-    private static void outputPrettyStream(List<String> columnNames, ResultSet rs) throws SQLException {
-        // First pass: calculate column widths
-        int[] maxWidths = new int[columnNames.size()];
-        for (int i = 0; i < columnNames.size(); i++) {
-            maxWidths[i] = columnNames.get(i).length();
-        }
-        
-        // Save current position to return later
-        rs.beforeFirst();
-        while (rs.next()) {
-            for (int i = 0; i < columnNames.size(); i++) {
-                Object value = rs.getObject(i + 1);
-                String strValue = value != null ? value.toString() : "NULL";
-                maxWidths[i] = Math.max(maxWidths[i], strValue.length());
-            }
-        }
-        
-        // Reset to beginning for second pass
-        rs.beforeFirst();
-        
-        // Output header and separator
-        String separator = "+";
-        for (int width : maxWidths) {
-            separator += repeatString("-", width + 2) + "+";
-        }
-        System.out.println(separator);
-        
-        System.out.print("|");
-        for (int i = 0; i < columnNames.size(); i++) {
-            System.out.print(" " + String.format("%-" + maxWidths[i] + "s", columnNames.get(i)) + " |");
-        }
-        System.out.println();
-        System.out.println(separator);
-        
-        // Stream rows with formatting
-        while (rs.next()) {
-            System.out.print("|");
-            for (int i = 0; i < columnNames.size(); i++) {
-                Object value = rs.getObject(i + 1);
-                String strValue = value != null ? value.toString() : "NULL";
-                System.out.print(" " + String.format("%-" + maxWidths[i] + "s", strValue) + " |");
-            }
-            System.out.println();
-        }
-        System.out.println(separator);
-    }
-    
+
+
+
     private static void outputTextStream(List<String> columnNames, ResultSet rs) throws SQLException {
         // Output header
         for (int i = 0; i < columnNames.size(); i++) {
@@ -927,7 +862,6 @@ public class QueryRunner {
             System.out.print(columnNames.get(i));
         }
         System.out.println();
-        
         // Stream rows
         while (rs.next()) {
             for (int i = 0; i < columnNames.size(); i++) {
@@ -938,13 +872,12 @@ public class QueryRunner {
             System.out.println();
         }
     }
-    
+
     private static void outputPretty(List<String> columnNames, List<Map<String, Object>> rows) {
         int[] maxWidths = new int[columnNames.size()];
         for (int i = 0; i < columnNames.size(); i++) {
             maxWidths[i] = columnNames.get(i).length();
         }
-        
         for (Map<String, Object> row : rows) {
             for (int i = 0; i < columnNames.size(); i++) {
                 Object value = row.get(columnNames.get(i));
@@ -952,20 +885,17 @@ public class QueryRunner {
                 maxWidths[i] = Math.max(maxWidths[i], strValue.length());
             }
         }
-        
         String separator = "+";
         for (int width : maxWidths) {
             separator += repeatString("-", width + 2) + "+";
         }
         System.out.println(separator);
-        
         System.out.print("|");
         for (int i = 0; i < columnNames.size(); i++) {
             System.out.print(" " + String.format("%-" + maxWidths[i] + "s", columnNames.get(i)) + " |");
         }
         System.out.println();
         System.out.println(separator);
-        
         for (Map<String, Object> row : rows) {
             System.out.print("|");
             for (int i = 0; i < columnNames.size(); i++) {
@@ -979,7 +909,7 @@ public class QueryRunner {
     }
 }
 EOF
-        
+
         if ! javac_output=$("$JAVAC_BIN" "$temp_java_file" 2>&1); then
             echo "Error: Failed to compile Java code" >&2
             echo "Compilation error details:" >&2
@@ -987,209 +917,138 @@ EOF
             rm -rf "$temp_dir"
             exit 1
         fi
-        
         # Save to cache for future use
         save_to_cache "$cache_key" "$temp_dir"
-        
         # Set trap to cleanup temp directory only for fresh compilations
         trap 'rm -rf "${temp_dir:-}"' EXIT
     fi
     fi
-    
     local classpath
     classpath=$(build_classpath "$JAR_FILE")
     export OUTPUT_FORMAT="$format" JDBC_URL JDBC_DRIVER_CLASS DB_USER DB_PASSWORD
     echo -n "$query" | "$JAVA_BIN" --enable-native-access=ALL-UNNAMED -cp "$classpath:$temp_dir" QueryRunner
 }
 
-interactive_mode() {
-    local db_type
-    db_type=$(detect_database_type)
-    echo "Query Runner - Interactive Mode" >&2
-    echo "Database Type: $db_type" >&2
-    if [[ "$db_type" != "sqlite" ]]; then
-        echo "Connected to: ${DB_DATABASE}@${DB_HOST}:${DB_PORT}" >&2
-    else
-        echo "Connected to: ${DB_DATABASE}" >&2
-    fi
-    echo "Enter SQL query (empty line to execute, Ctrl+C to exit):" >&2
-    
-    while true; do
-        echo -n "> " >&2
-        local query=""
-        local line
-        
-        while IFS= read -r line; do
-            if [[ -z "$line" ]]; then
-                break
-            fi
-            query+="$line"$'\n'
-            echo -n "> " >&2
-        done
-        
-        if [[ -z "$query" ]]; then
-            echo "Goodbye!" >&2
+# Check for Java availability
+if ! check_java_availability; then
+    download_standalone_jdk
+fi
+
+# Main script logic
+CLI_HOST=""
+CLI_PORT=""
+CLI_DATABASE=""
+CLI_USER=""
+CLI_PASSWORD=""
+CLI_TYPE=""
+CLI_FORMAT="text"
+CLI_ENV_FILE=""
+ALLOW_UNION_TABLES=""
+RETRY_MAX_ATTEMPTS=1
+RETRY_BACKOFF_FACTOR=2.0
+RETRY_INITIAL_DELAY=1000
+DOWNLOAD_DRIVER=""
+QUERY_FILE=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -f|--format)
+            CLI_FORMAT="$2"
+            shift 2
+            ;;
+        -t|--type)
+            CLI_TYPE="$2"
+            shift 2
+            ;;
+        -h|--host)
+            CLI_HOST="$2"
+            shift 2
+            ;;
+        -p|--port)
+            CLI_PORT="$2"
+            shift 2
+            ;;
+        -d|--database)
+            CLI_DATABASE="$2"
+            shift 2
+            ;;
+        -u|--user)
+            CLI_USER="$2"
+            shift 2
+            ;;
+        -P|--password)
+            CLI_PASSWORD="$2"
+            shift 2
+            ;;
+        -e|--env-file)
+            CLI_ENV_FILE="$2"
+            shift 2
+            ;;
+        --drivers-dir)
+            DRIVERS_DIR="$2"
+            shift 2
+            ;;
+        --list-drivers)
+            list_drivers
             exit 0
-        fi
-        
-        echo >&2
-        execute_query "$query" "text"
-        echo >&2
-    done
-}
-
-main() {
-    # Initialize cache and check/setup Java
-    init_cache
-    if ! check_java_availability; then
-        download_standalone_jdk
-    fi
-
-    local format="text"
-    local query_file=""
-    local list_drivers_flag=false
-    local test_connection_flag=false
-    local original_arg_count=$#
-    
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            -f|--format)
-                format="$2"
-                shift 2
-                ;;
-            -t|--type)
-                CLI_TYPE="$2"
-                shift 2
-                ;;
-            -h|--host)
-                CLI_HOST="$2"
-                shift 2
-                ;;
-            -p|--port)
-                CLI_PORT="$2"
-                shift 2
-                ;;
-            -d|--database)
-                CLI_DATABASE="$2"
-                shift 2
-                ;;
-            -u|--user)
-                CLI_USER="$2"
-                shift 2
-                ;;
-            -P|--password)
-                CLI_PASSWORD="$2"
-                shift 2
-                ;;
-            -e|--env-file)
-                ENV_FILE="$2"
-                shift 2
-                ;;
-            --drivers-dir)
-                DRIVERS_DIR="$2"
-                shift 2
-                ;;
-            --list-drivers)
-                list_drivers_flag=true
-                shift
-                ;;
-            --test-connection)
-                test_connection_flag=true
-                shift
-                ;;
-            --allow-union-tables)
-                export ALLOW_UNION_TABLES="$2"
-                shift 2
-                ;;
-            --retry-max-attempts)
-                export RETRY_MAX_ATTEMPTS="$2"
-                shift 2
-                ;;
-            --retry-backoff-factor)
-                export RETRY_BACKOFF_FACTOR="$2"
-                shift 2
-                ;;
-            --retry-initial-delay)
-                export RETRY_INITIAL_DELAY="$2"
-                shift 2
-                ;;
-            --help)
-                usage
-                ;;
-            -*)
-                echo "Error: Unknown option $1" >&2
-                usage
-                ;;
-            *)
-                if [[ -n "$query_file" ]]; then
-                    echo "Error: Multiple query files specified" >&2
-                    usage
-                fi
-                query_file="$1"
-                shift
-                ;;
-        esac
-    done
-    
-    # Show help if no arguments provided, no special flags set, and no stdin input
-    if [[ $original_arg_count -eq 0 && "$list_drivers_flag" == false && "$test_connection_flag" == false && -t 0 ]]; then
-        usage
-    fi
-    
-    case "$format" in
-        text|csv|json|pretty)
+            ;;
+        --test-connection)
+            load_env
+            test_connection
+            exit 0
+            ;;
+        --download-driver)
+            DOWNLOAD_DRIVER="$2"
+            shift 2
+            ;;
+        --allow-union-tables)
+            ALLOW_UNION_TABLES="$2"
+            shift 2
+            ;;
+        --retry-max-attempts)
+            RETRY_MAX_ATTEMPTS="$2"
+            shift 2
+            ;;
+        --retry-backoff-factor)
+            RETRY_BACKOFF_FACTOR="$2"
+            shift 2
+            ;;
+        --retry-initial-delay)
+            RETRY_INITIAL_DELAY="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            usage
             ;;
         *)
-            echo "Error: Invalid format '$format'. Must be one of: text, csv, json, pretty" >&2
-            exit 1
+            QUERY_FILE="$1"
+            shift
             ;;
     esac
-    
-    # Handle special flags
-    if [[ "$list_drivers_flag" == true ]]; then
-        list_drivers
-        exit 0
-    fi
-    
-    # Load environment and configure database
-    load_env
-    
-    if [[ "$test_connection_flag" == true ]]; then
-        test_connection
-        exit 0
-    fi
-    
-    # Interactive mode if no query file and stdin is a terminal
-    if [[ $# -eq 0 && -z "$query_file" && -t 0 ]]; then
-        interactive_mode
-        exit 0
-    fi
-    
-    local query=""
-    
-    if [[ -z "$query_file" ]]; then
-        if [[ -t 0 ]]; then
-            echo "Reading query from stdin (Ctrl+D to finish):" >&2
-        fi
-        query=$(cat)
-    else
-        if [[ ! -f "$query_file" ]]; then
-            echo "Error: Query file not found: $query_file" >&2
-            exit 1
-        fi
-        query=$(cat "$query_file")
-    fi
-    
-    if [[ -z "$query" ]]; then
-        if [[ $# -eq 0 ]]; then
-            usage
-        else
-            echo "Error: Empty query provided" >&2
-            exit 1
-        fi
-    fi
-    
-    execute_query "$query" "$format"
-}
+done
 
-main "$@"
+if [[ -n "$DOWNLOAD_DRIVER" ]]; then
+    download_driver "$DOWNLOAD_DRIVER"
+    exit 0
+fi
+
+# Load environment
+load_env
+
+# Get query
+if [[ -n "$QUERY_FILE" ]]; then
+    if [[ ! -f "$QUERY_FILE" ]]; then
+        echo "Error: Query file not found: $QUERY_FILE" >&2
+        exit 1
+    fi
+    query=$(cat "$QUERY_FILE")
+else
+    query=$(cat)
+fi
+
+# Execute
+execute_query "$query" "$CLI_FORMAT"
