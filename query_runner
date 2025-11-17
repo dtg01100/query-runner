@@ -357,7 +357,7 @@ check_union_safety() {
     echo "For safe UNION operations, use:" >&2
     echo "  1. UNION ALL with the same table" >&2
     echo "  2. UNION in WITH clauses (CTEs)" >&2
-    echo "  3. --allow-union-tableS=table1,table2 flag for trusted tables" >&2
+    echo "  3. --allow-union-tables=table1,table2 flag for trusted tables" >&2
     exit 1
 }
 
