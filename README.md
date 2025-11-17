@@ -1,3 +1,12 @@
+What verbose mode shows:
+
+- Detection and configuration details (database type, driver's jar, classpath)
+- Whether a precompiled QueryRunner.class or cached compiled class is used
+- Java compilation invocation and cache operations
+- Java runtime invocation (classpath used)
+- Full SQL exception stack traces when errors occur
+
+Note: Debug/verbose mode will NOT print sensitive data such as DB passwords. The JDBC URL is masked in debug output if it contains a password parameter.
 # Generic Query Runner
 
 A universal JDBC query runner that auto-configures for multiple database types with support for various output formats.
@@ -403,6 +412,28 @@ Set environment variable for verbose output:
 ```bash
 export QUERY_RUNNER_DEBUG=1
 ./query_runner query.sql
+
+Alternatively, you can enable verbose output using the CLI flags:
+
+```bash
+# Short flag
+./query_runner -v query.sql
+
+# Long flag
+./query_runner --verbose query.sql
+
+# Alias
+./query_runner --debug query.sql
+```
+
+What verbose mode shows:
+- Detection and configuration details (database type, driver's jar, classpath)
+- Whether a precompiled QueryRunner.class or cached compiled class is used
+- Java compilation invocation and cache operations
+- Java runtime invocation (classpath used)
+- Full SQL exception stack traces when errors occur
+
+Note: Debug/verbose mode will NOT print sensitive data such as DB passwords. The JDBC URL is masked in debug output if it contains a password parameter.
 ```
 
 ### Connection Timeout

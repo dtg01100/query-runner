@@ -11,6 +11,9 @@ CACHE_DIR="$HOME/.query_runner/cache"
 JAVA_BIN=""
 JAVAC_BIN=""
 
+# Default debug flag from environment variable - CLI can override
+QUERY_RUNNER_DEBUG="${QUERY_RUNNER_DEBUG:-0}"
+
 # Cache management functions
 init_cache() {
     [[ -d "$CACHE_DIR" ]] || mkdir -p "$CACHE_DIR"
@@ -41,6 +44,14 @@ get_cache_key() {
 get_cache_dir_for_key() {
     local cache_key="$1"
     echo "$CACHE_DIR/$cache_key"
+}
+
+# Debug helper: echo messages only when DEBUG is enabled
+debug() {
+    local debug_val="${DEBUG:-$QUERY_RUNNER_DEBUG}"
+    if [[ "$debug_val" != "0" && "$debug_val" != "false" ]]; then
+        echo "DEBUG: $*" >&2
+    fi
 }
 
 is_cache_valid() {
@@ -162,6 +173,7 @@ get_cached_classpath() {
         local current_key
         current_key=$(get_classpath_cache_key)
         if [[ "$cache_key" == "$current_key" ]]; then
+            debug "Using cached classpath file: $cache_file"
             cat "$cache_file"
             return 0
         fi
@@ -185,7 +197,8 @@ build_classpath() {
     # Try to get from cache first
     local cached_classpath
     if cached_classpath=$(get_cached_classpath "$cache_key"); then
-echo "$cached_classpath:$jar_file"
+        debug "Using cached classpath: $cached_classpath"
+        echo "$cached_classpath:$jar_file"
         return 0
     fi
 
@@ -302,6 +315,8 @@ Options:
     --drivers-dir DIR       JDBC drivers directory (default: ./drivers)
     --list-drivers          List available database drivers and exit
     --test-connection       Test database connection and exit
+    -v, --verbose           Enable verbose debug output (same as QUERY_RUNNER_DEBUG=1)
+    --debug                 Alias for --verbose
     --download-driver TYPE  Download JDBC driver for TYPE (mysql, postgresql, h2, sqlite, sqlserver)
     --allow-union-tables TABLES  Comma-separated list of tables allowed in UNION queries
     --retry-max-attempts N     Maximum number of connection retry attempts (default: 1)
@@ -677,12 +692,12 @@ echo "You can specify connection details via command line options" >&2
         fi
     fi
 
-    echo "Using database type: $db_type" >&2
+    debug "Using database type: $db_type"
     configure_database "$db_type"
 
     # Find the appropriate driver JAR
     JAR_FILE=$(find_driver_jar "$DRIVER_JAR")
-    echo "Using driver: $(basename "$JAR_FILE")" >&2
+    debug "Using driver: $(basename "$JAR_FILE")"
 
     # Validate required variables
     if [[ "$db_type" != "sqlite" ]]; then
@@ -720,6 +735,7 @@ execute_query() {
     if precompiled_class=$(get_precompiled_class); then
         compilation_dir=$(dirname "$precompiled_class")
         use_precompiled=true
+        debug "Using precompiled class in $compilation_dir"
     else
         # Initialize cache and check for valid cached compilation
         init_cache
@@ -729,6 +745,7 @@ execute_query() {
         if is_cache_valid "$cache_key"; then
             cached_class_file=$(load_from_cache "$cache_key")
             compilation_dir=$(dirname "$cached_class_file")
+            debug "Using cached compiled class in $compilation_dir"
         else
             # Need to compile
             compilation_dir="$temp_dir"
@@ -737,8 +754,28 @@ execute_query() {
 cat > "$temp_java_file" << 'EOF'
 import java.sql.*;
 import java.util.*;
+import java.util.regex.*;
 
 public class QueryRunner {
+
+    private static boolean isDebug() {
+        String v = System.getenv("QUERY_RUNNER_DEBUG");
+        return v != null && (v.equals("1") || v.equalsIgnoreCase("true"));
+    }
+
+    private static void debug(String msg) {
+        if (isDebug()) System.err.println("DEBUG: " + msg);
+    }
+
+    private static String maskJdbcUrl(String url) {
+        if (url == null) return null;
+        // Mask password= param in JDBC URL if present
+        try {
+            return url.replaceAll("(?i)(password=)([^&;]+)", "$1******");
+        } catch (Exception e) {
+            return url;
+        }
+    }
 
     public static void main(String[] args) {
         String query = "";
@@ -752,6 +789,9 @@ public class QueryRunner {
         String password = System.getenv("DB_PASSWORD");
         String format = System.getenv("OUTPUT_FORMAT");
         if (format == null) format = "text";
+        debug("JDBC driver class: " + driver);
+        debug("JDBC URL: " + maskJdbcUrl(url));
+        debug("DB user: " + (user == null ? "(none)" : user));
         try {
             Class.forName(driver);
         } catch (ClassNotFoundException e) {
@@ -798,6 +838,9 @@ public class QueryRunner {
             System.err.println("SQL Error: " + e.getMessage());
             System.err.println("SQL State: " + e.getSQLState());
             System.err.println("Error Code: " + e.getErrorCode());
+            if (isDebug()) {
+                e.printStackTrace(System.err);
+            }
             System.exit(1);
         }
     }
@@ -953,7 +996,8 @@ public class QueryRunner {
 }
 EOF
 
-        if ! javac_output=$("$JAVAC_BIN" "$temp_java_file" 2>&1); then
+    debug "Compiling temporary Java file: $temp_java_file"
+    if ! javac_output=$("$JAVAC_BIN" "$temp_java_file" 2>&1); then
             echo "Error: Failed to compile Java code" >&2
             echo "Compilation error details:" >&2
             echo "$javac_output" >&2
@@ -961,12 +1005,16 @@ EOF
         fi
         # Save to cache for future use
         save_to_cache "$cache_key" "$compilation_dir"
+        debug "Compiled and saved class to cache at $compilation_dir"
         fi
     fi
     local classpath
     classpath=$(build_classpath "$JAR_FILE")
     export OUTPUT_FORMAT="$format" JDBC_URL JDBC_DRIVER_CLASS DB_USER DB_PASSWORD
+    # Pass DEBUG to Java process as QUERY_RUNNER_DEBUG env var so the Java runner can also print debug info
+    export QUERY_RUNNER_DEBUG="${DEBUG:-${QUERY_RUNNER_DEBUG:-0}}"
     echo -n "$query" | "$JAVA_BIN" --enable-native-access=ALL-UNNAMED -cp "$classpath:$compilation_dir" QueryRunner
+    debug "Running java: $JAVA_BIN -cp $classpath:$compilation_dir QueryRunner"
 }
 
 # Check for Java availability
@@ -1057,6 +1105,16 @@ while [[ $# -gt 0 ]]; do
             RETRY_INITIAL_DELAY="$2"
             shift 2
             ;;
+        -v|--verbose)
+            CLI_VERBOSE=1
+            DEBUG=1
+            shift
+            ;;
+        --debug)
+            CLI_DEBUG=1
+            DEBUG=1
+            shift
+            ;;
         -h|--help)
             usage
             ;;
@@ -1074,6 +1132,12 @@ done
 if [[ -n "$DOWNLOAD_DRIVER" ]]; then
     download_driver "$DOWNLOAD_DRIVER"
     exit 0
+fi
+
+# Set DEBUG based on CLI flags or environment variable
+DEBUG="${CLI_VERBOSE:-${CLI_DEBUG:-${QUERY_RUNNER_DEBUG:-0}}}"
+if [[ "$DEBUG" != "0" && "$DEBUG" != "false" ]]; then
+    debug "Debug mode enabled (DEBUG=$DEBUG)."
 fi
 
 # Load environment

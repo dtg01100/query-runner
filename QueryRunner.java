@@ -1,7 +1,27 @@
 import java.sql.*;
 import java.util.*;
+import java.util.regex.*;
 
 public class QueryRunner {
+
+    private static boolean isDebug() {
+        String v = System.getenv("QUERY_RUNNER_DEBUG");
+        return v != null && (v.equals("1") || v.equalsIgnoreCase("true"));
+    }
+
+    private static void debug(String msg) {
+        if (isDebug()) System.err.println("DEBUG: " + msg);
+    }
+
+    private static String maskJdbcUrl(String url) {
+        if (url == null) return null;
+        // Mask password= param in JDBC URL if present
+        try {
+            return url.replaceAll("(?i)(password=)([^&;]+)", "$1******");
+        } catch (Exception e) {
+            return url;
+        }
+    }
 
     public static void main(String[] args) {
         String query = "";
@@ -15,6 +35,9 @@ public class QueryRunner {
         String password = System.getenv("DB_PASSWORD");
         String format = System.getenv("OUTPUT_FORMAT");
         if (format == null) format = "text";
+        debug("JDBC driver class: " + driver);
+        debug("JDBC URL: " + maskJdbcUrl(url));
+        debug("DB user: " + (user == null ? "(none)" : user));
         try {
             Class.forName(driver);
             Connection conn = DriverManager.getConnection(url, user, password);
@@ -59,9 +82,15 @@ public class QueryRunner {
             System.err.println("SQL Error: " + e.getMessage());
             System.err.println("SQL State: " + e.getSQLState());
             System.err.println("Error Code: " + e.getErrorCode());
+            if (isDebug()) {
+                e.printStackTrace(System.err);
+            }
             System.exit(1);
         } catch (ClassNotFoundException e) {
             System.err.println("Error: JDBC driver not found: " + e.getMessage());
+            if (isDebug()) {
+                e.printStackTrace(System.err);
+            }
             System.exit(1);
         }
     }
