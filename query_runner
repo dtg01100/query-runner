@@ -111,7 +111,15 @@ download_standalone_jdk() {
     local java_dir="$CACHE_DIR/jdk"
 
     if [[ ! -d "$java_dir" ]]; then
-echo "Downloading standalone JDK..." >&2
+        echo "Java is not found on your system." >&2
+        read -p "Do you want to download a standalone JDK? (y/n) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "Java is required to run this script. Aborting." >&2
+            exit 1
+        fi
+
+        echo "Downloading standalone JDK..." >&2
         if ! curl -L -o "$java_archive" "$java_url" 2>/dev/null; then
             echo "Error: Failed to download JDK from $java_url" >&2
             exit 1
@@ -130,7 +138,7 @@ echo "Downloading standalone JDK..." >&2
 
     # Verify the downloaded Java works
     if ! "$JAVA_BIN" -version >/dev/null 2>&1 || ! "$JAVAC_BIN" -version >/dev/null 2>&1; then
-echo "Error: Downloaded JDK is not functional" >&2
+        echo "Error: Downloaded JDK is not functional" >&2
         rm -rf "$java_dir"
         exit 1
     fi
@@ -364,7 +372,8 @@ check_union_safety() {
 check_read_only() {
     local query="$1"
     local normalized_query
-    normalized_query=$(echo "$query" | tr '[:upper:]' '[:lower:]' | sed 's/--.*$//' | sed 's/\s\+/ /g' | xargs)
+    # Normalize query: lowercase, remove comments, collapse whitespace
+    normalized_query=$(echo "$query" | perl -ne 'print lc' | perl -pe 's/--.*?$//g; s/\/\*.*?\*\///g; s/\s+/ /g;' | xargs)
 
     # Check for dangerous patterns anywhere in the query
     local dangerous_patterns=(
@@ -399,12 +408,6 @@ check_read_only() {
             fi
         fi
     done
-
-    # Check for suspicious comment patterns that might hide malicious code
-    if [[ "$normalized_query" =~ [[:space:]]*/\*.*\*/[[:space:]]* ]]; then
-echo "Error: Block comments are not allowed for security reasons" >&2
-        exit 1
-    fi
 
     # Check for multiple statements (semicolon separation)
     if [[ "$normalized_query" == *";"* ]]; then
@@ -701,16 +704,21 @@ echo "Error: Database name is required" >&2
 execute_query() {
     local query="$1"
     local format="$2"
-    local temp_dir temp_java_file cache_key cached_class_file
+    local temp_dir
+    temp_dir=$(mktemp -d)
+    trap 'rm -rf "${temp_dir:-}"' EXIT
+
+    local temp_java_file cache_key cached_class_file
 
     check_read_only "$query"
 
     # Check for pre-compiled class first
     local precompiled_class
     local use_precompiled=false
+    local compilation_dir
 
     if precompiled_class=$(get_precompiled_class); then
-        temp_dir=$(dirname "$precompiled_class")
+        compilation_dir=$(dirname "$precompiled_class")
         use_precompiled=true
     else
         # Initialize cache and check for valid cached compilation
@@ -720,11 +728,11 @@ execute_query() {
 
         if is_cache_valid "$cache_key"; then
             cached_class_file=$(load_from_cache "$cache_key")
-            temp_dir=$(dirname "$cached_class_file")
+            compilation_dir=$(dirname "$cached_class_file")
         else
             # Need to compile
-            temp_dir=$(mktemp -d)
-            temp_java_file="$temp_dir/QueryRunner.java"
+            compilation_dir="$temp_dir"
+            temp_java_file="$compilation_dir/QueryRunner.java"
 
 cat > "$temp_java_file" << 'EOF'
 import java.sql.*;
@@ -746,15 +754,22 @@ public class QueryRunner {
         if (format == null) format = "text";
         try {
             Class.forName(driver);
-            Connection conn = DriverManager.getConnection(url, user, password);
-            Statement stmt = conn.createStatement();
-            ResultSet rs = stmt.executeQuery(query);
+        } catch (ClassNotFoundException e) {
+            System.err.println("Error: JDBC driver not found: " + e.getMessage());
+            System.exit(1);
+        }
+
+        try (Connection conn = DriverManager.getConnection(url, user, password);
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery(query)) {
+
             ResultSetMetaData meta = rs.getMetaData();
             int columnCount = meta.getColumnCount();
             List<String> columnNames = new ArrayList<>();
             for (int i = 1; i <= columnCount; i++) {
                 columnNames.add(meta.getColumnName(i));
             }
+
             switch (format) {
                 case "pretty":
                     // For pretty format, load all rows to calculate widths
@@ -779,23 +794,51 @@ public class QueryRunner {
                     outputTextStream(columnNames, rs);
                     break;
             }
-            rs.close();
-            stmt.close();
-            conn.close();
         } catch (SQLException e) {
             System.err.println("SQL Error: " + e.getMessage());
             System.err.println("SQL State: " + e.getSQLState());
             System.err.println("Error Code: " + e.getErrorCode());
             System.exit(1);
-        } catch (ClassNotFoundException e) {
-            System.err.println("Error: JDBC driver not found: " + e.getMessage());
-            System.exit(1);
         }
     }
 
     private static String escapeJson(String str) {
-        if (str == null) return null;
-        return str.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t");
+        if (str == null) {
+            return null;
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < str.length(); i++) {
+            char c = str.charAt(i);
+            switch (c) {
+                case '\\':
+                case '"':
+                    sb.append('\\').append(c);
+                    break;
+                case '\b':
+                    sb.append("\\b");
+                    break;
+                case '\t':
+                    sb.append("\\t");
+                    break;
+                case '\n':
+                    sb.append("\\n");
+                    break;
+                case '\f':
+                    sb.append("\\f");
+                    break;
+                case '\r':
+                    sb.append("\\r");
+                    break;
+                default:
+                    if (c < ' ') {
+                        String t = "000" + Integer.toHexString(c);
+                        sb.append("\\u").append(t.substring(t.length() - 4));
+                    } else {
+                        sb.append(c);
+                    }
+            }
+        }
+        return sb.toString();
     }
 
     private static String repeatString(String str, int count) {
@@ -914,19 +957,16 @@ EOF
             echo "Error: Failed to compile Java code" >&2
             echo "Compilation error details:" >&2
             echo "$javac_output" >&2
-            rm -rf "$temp_dir"
             exit 1
         fi
         # Save to cache for future use
-        save_to_cache "$cache_key" "$temp_dir"
-        # Set trap to cleanup temp directory only for fresh compilations
-        trap 'rm -rf "${temp_dir:-}"' EXIT
-    fi
+        save_to_cache "$cache_key" "$compilation_dir"
+        fi
     fi
     local classpath
     classpath=$(build_classpath "$JAR_FILE")
     export OUTPUT_FORMAT="$format" JDBC_URL JDBC_DRIVER_CLASS DB_USER DB_PASSWORD
-    echo -n "$query" | "$JAVA_BIN" --enable-native-access=ALL-UNNAMED -cp "$classpath:$temp_dir" QueryRunner
+    echo -n "$query" | "$JAVA_BIN" --enable-native-access=ALL-UNNAMED -cp "$classpath:$compilation_dir" QueryRunner
 }
 
 # Check for Java availability
