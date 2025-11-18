@@ -23,12 +23,166 @@ public class QueryRunner {
         }
     }
 
-    public static void main(String[] args) {
+public static void main(String[] args) {
         String query = "";
         Scanner scanner = new Scanner(System.in);
         if (scanner.hasNextLine()) {
             query = scanner.useDelimiter("\\A").next();
         }
+        
+        // Input validation and sanitization
+        if (query == null || query.trim().isEmpty()) {
+            System.err.println("Error: Query cannot be empty");
+            System.exit(1);
+        }
+        
+        // Check for maximum query length
+        if (query.length() > 1048576) { // 1MB limit
+            System.err.println("Error: Query too long (maximum 1MB)");
+            System.exit(1);
+        }
+        
+        // Remove any potential null bytes or control characters
+        query = query.replaceAll("\\u0000|\\p{Cntrl}", "");
+        
+        String url = System.getenv("JDBC_URL");
+        String driver = System.getenv("JDBC_DRIVER_CLASS");
+        String user = System.getenv("DB_USER");
+        String password = System.getenv("DB_PASSWORD");
+        String format = System.getenv("OUTPUT_FORMAT");
+        if (format == null) format = "text";
+        
+        // Validate required parameters
+        if (url == null || url.trim().isEmpty()) {
+            System.err.println("Error: JDBC URL not provided");
+            System.exit(1);
+        }
+        
+        if (driver == null || driver.trim().isEmpty()) {
+            System.err.println("Error: JDBC driver class not provided");
+            System.exit(1);
+        }
+        
+        // Sanitize JDBC URL
+        url = sanitizeJdbcUrl(url);
+        
+        debug("JDBC driver class: " + driver);
+        debug("JDBC URL: " + maskJdbcUrl(url));
+        debug("DB user: " + (user == null ? "(none)" : user));
+        
+        try {
+            Class.forName(driver);
+        } catch (ClassNotFoundException e) {
+            System.err.println("Error: JDBC driver not found: " + sanitizeOutput(e.getMessage()));
+            System.exit(1);
+        }
+
+        try (Connection conn = DriverManager.getConnection(url, user, password);
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery(query)) {
+
+            ResultSetMetaData meta = rs.getMetaData();
+            int columnCount = meta.getColumnCount();
+            List<String> columnNames = new ArrayList<>();
+            for (int i = 1; i <= columnCount; i++) {
+                String columnName = meta.getColumnName(i);
+                // Sanitize column names to prevent malicious content
+                columnName = sanitizeOutput(columnName);
+                columnNames.add(columnName);
+            }
+
+            switch (format) {
+                case "pretty":
+                    // For pretty format, load all rows to calculate widths
+                    List<Map<String, Object>> rows = new ArrayList<>();
+                    int rowCount = 0;
+                    final int MAX_ROWS = 10000; // Prevent DoS from huge result sets
+                    
+                    while (rs.next() && rowCount < MAX_ROWS) {
+                        Map<String, Object> row = new HashMap<>();
+                        for (int i = 1; i <= columnCount; i++) {
+                            Object value = rs.getObject(i);
+                            // Sanitize values to prevent malicious content in output
+                            if (value != null) {
+                                String stringValue = value.toString();
+                                // Limit value length to prevent DoS
+                                if (stringValue.length() > 10000) {
+                                    stringValue = stringValue.substring(0, 10000) + "...";
+                                }
+                                value = sanitizeOutput(stringValue);
+                            }
+                            row.put(columnNames.get(i-1), value);
+                        }
+                        rows.add(row);
+                        rowCount++;
+                    }
+                    
+                    if (rowCount >= MAX_ROWS) {
+                        System.err.println("Warning: Result set truncated at " + MAX_ROWS + " rows for security");
+                    }
+                    
+                    outputPretty(columnNames, rows);
+                    break;
+                case "json":
+                    outputJsonStream(columnNames, rs);
+                    break;
+                case "csv":
+                    outputCsvStream(columnNames, rs);
+                    break;
+                case "text":
+                default:
+                    outputTextStream(columnNames, rs);
+                    break;
+            }
+        } catch (SQLException e) {
+            // Sanitize error messages to prevent information leakage
+            String errorMessage = e.getMessage();
+            if (errorMessage != null) {
+                // Remove potentially sensitive information from error messages
+                errorMessage = errorMessage.replaceAll("(?i)(password|passwd|pwd)\\s*[:=]\\s*[^\\s,;]+", "$1=******");
+                errorMessage = errorMessage.replaceAll("(?i)(user|username|uid)\\s*[:=]\\s*[^\\s,;]+", "$1=******");
+                errorMessage = errorMessage.replaceAll("(?i)(host|server)\\s*[:=]\\s*[^\\s,;]+", "$1=******");
+            }
+            
+            // Provide more helpful error messages for common issues
+            if (errorMessage != null) {
+                if (errorMessage.contains("database") && errorMessage.contains("not found")) {
+                    System.err.println("Database connection failed: Database not found or inaccessible");
+                    System.err.println("Please check your database path/URL and ensure the database exists.");
+                } else if (errorMessage.contains("access") || errorMessage.contains("permission")) {
+                    System.err.println("Database connection failed: Access denied");
+                    System.err.println("Please check your database permissions and credentials.");
+                } else if (errorMessage.contains("driver")) {
+                    System.err.println("Database connection failed: JDBC driver issue");
+                    System.err.println("Please ensure the appropriate JDBC driver is available in the drivers directory.");
+                } else if (errorMessage.contains("table") && errorMessage.contains("not found")) {
+                    System.err.println("Query execution failed: Table not found");
+                    System.err.println("Please check your table names and database schema.");
+                } else if (errorMessage.contains("syntax") || errorMessage.contains("SQL")) {
+                    System.err.println("Query execution failed: Invalid SQL syntax");
+                    System.err.println("Please check your SQL query for syntax errors.");
+                } else {
+                    System.err.println("SQL Error: " + sanitizeOutput(errorMessage));
+                    System.err.println("Please check your query and database connection.");
+                }
+            } else {
+                System.err.println("SQL Error: Database operation failed");
+                System.err.println("Please check your query and database connection.");
+            }
+            
+            if (isDebug()) {
+                e.printStackTrace(System.err);
+            }
+            System.exit(1);
+        } catch (Exception e) {
+            // Generic error handling for other exceptions
+            System.err.println("Error: " + sanitizeOutput(e.getMessage() != null ? e.getMessage() : "An error occurred"));
+            if (isDebug()) {
+                e.printStackTrace(System.err);
+            }
+            System.exit(1);
+        }
+    }
         
         // Input validation and sanitization
         if (query == null || query.trim().isEmpty()) {

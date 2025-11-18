@@ -884,100 +884,97 @@ echo "$db_type"
     return 1
 }
 
-# Validate JDBC connection parameters
-validate_jdbc_params() {
+# Validate and sanitize database connection and content
+validate_database_security() {
     local db_type="$1"
-    local host="${2:-}"
-    local port="${3:-}"
-    local database="${4:-}"
-    local user="${5:-}"
-    local password="${6:-}"
+    local db_connection_string="$2"
     
-    # Validate database type (already done in CLI validation)
-    if ! [[ "$db_type" =~ ^(mysql|postgresql|oracle|sqlserver|db2|h2|sqlite)$ ]]; then
-        echo "Error: Invalid database type: $db_type" >&2
-        exit 1
-    fi
+    debug "Validating database security for type: $db_type"
     
-    # Validate host (if provided)
-    if [[ -n "$host" ]]; then
-        # Length validation
-        if [[ ${#host} -gt 255 ]]; then
-            echo "Error: Host name too long" >&2
-            exit 1
-        fi
-        
-        # Basic hostname validation (allow localhost, IPs, and domain names)
-        if ! [[ "$host" =~ ^[a-zA-Z0-9.-]+$ ]]; then
-            echo "Error: Invalid host name format: $host" >&2
-            exit 1
-        fi
-        
-        # Reject potentially dangerous hosts
-        case "$host" in
-            /.*|.*\.\..*|.*\`.*|.*\$.*|.*\!.*)
-                echo "Error: Invalid host name: $host" >&2
-                exit 1
-                ;;
-        esac
-    fi
-    
-    # Validate port (if provided)
-    if [[ -n "$port" ]]; then
-        if ! [[ "$port" =~ ^[0-9]+$ ]] || [[ $port -lt 1 ]] || [[ $port -gt 65535 ]]; then
-            echo "Error: Invalid port number: $port" >&2
-            exit 1
-        fi
-    fi
-    
-    # Validate database name/path
-    if [[ -n "$database" ]]; then
-        case "$db_type" in
-            "sqlite"|"h2")
-                # For file-based databases, validate the path
-                if [[ "$database" != ":memory:" ]] && [[ "$database" != file:* ]] && [[ "$database" != jdbc:sqlite:* ]]; then
-                    # Validate as file path
-                    if ! validate_path_input "$database" "database"; then
-                        echo "Error: Invalid database path: $database" >&2
+    # Validate database type against known safe types
+    case "$db_type" in
+        "sqlite"|"h2")
+            # For file-based databases, additional validation
+            if [[ -n "${db_connection_string:-}" ]]; then
+                # Check for potential malicious file paths or injection attempts
+                if [[ "$db_connection_string" =~ [\\\<\>\&\|\;\`] ]]; then
+                    echo "Error: Database connection string contains invalid characters" >&2
+                    echo "Please use a valid database file path or connection URL." >&2
+                    exit 1
+                fi
+                
+                # For SQLite, prevent access to system files
+                if [[ "$db_type" == "sqlite" ]] && [[ "$db_connection_string" =~ ^/(etc|proc|sys|dev|boot|root|bin|sbin|lib|lib64)/ ]]; then
+                    echo "Error: SQLite database path attempts to access system directories" >&2
+                    echo "SQLite databases must be in user-accessible locations." >&2
+                    exit 1
+                fi
+            fi
+            ;;
+        "mysql"|"postgresql"|"oracle"|"sqlserver"|"db2")
+            # For server-based databases, validate connection string format
+            if [[ -n "${db_connection_string:-}" ]]; then
+                # Check for potential connection string injection
+                if [[ "$db_connection_string" =~ (LOAD_FILE|SELECT.*INTO.*OUTFILE|EXEC|xp_|sp_|UNION|DROP|CREATE|ALTER) ]]; then
+                    echo "Error: Database connection string contains suspicious patterns" >&2
+                    echo "Please use a valid JDBC connection URL." >&2
+                    exit 1
+                fi
+                
+                # Validate JDBC URL format
+                if ! [[ "$db_connection_string" =~ ^jdbc: ]]; then
+                    echo "Error: Invalid JDBC URL format" >&2
+                    echo "Connection string must start with 'jdbc:'" >&2
+                    exit 1
+                fi
+                
+                # Check for potential credential injection in URL
+                if [[ "$db_connection_string" =~ [@?&]([^&=]*)=([^&]*) ]]; then
+                    local param_name="${BASH_REMATCH[1]}"
+                    local param_value="${BASH_REMATCH[2]}"
+                    
+                    # URL decode the values for validation
+                    param_value=$(printf '%b' "${param_value//%/\\x}")
+                    
+                    # Check for dangerous values in connection parameters
+                    if [[ "$param_value" =~ [\\\<\>\&\|\;\`] ]]; then
+                        echo "Error: Database connection parameter contains invalid characters" >&2
+                        echo "Connection parameters must not contain shell metacharacters." >&2
                         exit 1
                     fi
                 fi
+            fi
+            ;;
+    esac
+}
+
+# Enhanced database initialization with security checks
+initialize_database_connection() {
+    local db_type="$1"
+    
+    # Validate database security before attempting connection
+    local jdbc_url_to_validate="${JDBC_URL:-}"
+    if [[ -z "$jdbc_url_to_validate" ]]; then
+        # If no JDBC URL, construct one for validation
+        case "$db_type" in
+            "sqlite")
+                jdbc_url_to_validate="jdbc:sqlite:${DB_DATABASE:-}"
+                ;;
+            "h2")
+                jdbc_url_to_validate="jdbc:h2:${DB_DATABASE:-}"
                 ;;
             *)
-                # For server-based databases, validate database name
-                if [[ ${#database} -gt 64 ]]; then
-                    echo "Error: Database name too long" >&2
-                    exit 1
-                fi
-                # Basic database name validation
-                if ! [[ "$database" =~ ^[a-zA-Z0-9_/.-]+$ ]]; then
-                    echo "Error: Invalid database name: $database" >&2
-                    exit 1
+                jdbc_url_to_validate="jdbc:${db_type}://${DB_HOST:-localhost}:${DB_PORT:-}/"
+                if [[ -n "${DB_DATABASE:-}" ]]; then
+                    jdbc_url_to_validate="${jdbc_url_to_validate}${DB_DATABASE}"
                 fi
                 ;;
         esac
     fi
     
-    # Validate user (if provided)
-    if [[ -n "$user" ]]; then
-        if [[ ${#user} -gt 64 ]]; then
-            echo "Error: User name too long" >&2
-            exit 1
-        fi
-        # Basic username validation
-        if ! [[ "$user" =~ ^[a-zA-Z0-9_@.-]+$ ]]; then
-            echo "Error: Invalid user name: $user" >&2
-            exit 1
-        fi
-    fi
+    validate_database_security "$db_type" "$jdbc_url_to_validate"
     
-    # Validate password length (but don't validate content for security)
-    if [[ -n "$password" ]]; then
-        if [[ ${#password} -gt 1024 ]]; then
-            echo "Error: Password too long" >&2
-            exit 1
-        fi
-    fi
+    debug "Database security validation passed for $db_type"
 }
 
 # Enhanced database configuration with validation
@@ -1321,6 +1318,9 @@ load_env() {
         fi
     fi
     debug "Using database type: $db_type"
+    
+    # Initialize database connection with security validation
+    initialize_database_connection "$db_type"
     
     # If using SQLite or H2, normalize DB_DATABASE path (unless in-memory or file: URI)
     if [[ -n "${DB_DATABASE:-}" && ("$db_type" == "sqlite" || ("$db_type" == "h2" && ("${DB_DATABASE}" == ~* || "${DB_DATABASE}" == /* || "${DB_DATABASE}" == */* || "${DB_DATABASE}" == ./*))) ]]; then
