@@ -133,6 +133,8 @@ DB_TYPE=sqlite
 DB_DATABASE=/path/to/database.db
 ```
 
+Note: For SQLite, when you provide a file path for `DB_DATABASE` (via `.env` or `-d/--database`), the runner normalizes and canonicalizes the path by default. It rejects control characters (NUL/newline/tab/carriage return) and trims whitespace. Use `:memory:` or `jdbc:sqlite:`/`file:` URIs to avoid file handling if you prefer.
+
 ## Usage
 
 ### Basic Usage

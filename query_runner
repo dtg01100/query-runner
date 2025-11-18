@@ -54,7 +54,7 @@ debug() {
     fi
 }
 
-# Normalize / harden file path handling for query file path
+# Normalize / harden file path handling for filesystem paths used by the script
 # - trims whitespace and CRLF characters
 # - expands leading ~ to $HOME
 # - canonicalizes path using realpath/readlink or fallback
@@ -140,6 +140,14 @@ normalize_query_file_path() {
     # If not found or canonicalization fails, return the trimmed path (may be relative)
     printf '%s' "$path"
     return 0
+}
+
+# Generic wrapper for normalizing filesystem paths that can be used for both
+# query files and database files. Keep a separate name for clarity.
+normalize_fs_path() {
+    local p
+    p=$(normalize_query_file_path "$1") || return 1
+    printf '%s' "$p"
 }
 
 is_cache_valid() {
@@ -780,8 +788,44 @@ echo "You can specify connection details via command line options" >&2
             exit 1
         fi
     fi
-
     debug "Using database type: $db_type"
+    # If using SQLite or H2, normalize DB_DATABASE path (unless in-memory or file: URI)
+    if [[ -n "${DB_DATABASE:-}" && ("$db_type" == "sqlite" || ("$db_type" == "h2" && ("${DB_DATABASE}" == ~* || "${DB_DATABASE}" == /* || "${DB_DATABASE}" == */* || "${DB_DATABASE}" == ./*))) ]]; then
+        case "${DB_DATABASE}" in
+            ":memory:")
+                debug "SQLite in-memory DB requested; skipping path normalization"
+                ;;
+            file:*)
+                debug "SQLite file URI detected; skipping path normalization: ${DB_DATABASE}"
+                ;;
+            jdbc:sqlite:*)
+                debug "SQLite JDBC URL detected; skipping path normalization: ${DB_DATABASE}"
+                ;;
+            *)
+                # Normalize path and convert to absolute form if possible
+                normalized_db=$(normalize_fs_path "${DB_DATABASE}") || { echo "Error: Invalid database path: ${DB_DATABASE}" >&2; exit 1; }
+                # Convert to absolute if possible (use realpath -m if available)
+                if [[ "${normalized_db}" != /* ]]; then
+                    if command -v realpath >/dev/null 2>&1; then
+                        normalized_db=$(realpath -m -- "${normalized_db}" 2>/dev/null || printf '%s' "${normalized_db}")
+                    else
+                        local db_dir db_base
+                        db_dir=$(dirname -- "${normalized_db}" 2>/dev/null || printf '%s' "${normalized_db}")
+                        db_base=$(basename -- "${normalized_db}" 2>/dev/null || printf '%s' "${normalized_db}")
+                        if cd -- "${db_dir}" 2>/dev/null; then
+                            normalized_db="$PWD/$db_base"
+                        fi
+                    fi
+                fi
+                DB_DATABASE="$normalized_db"
+                debug "Normalized DB path: $DB_DATABASE"
+                ;;
+        esac
+    fi
+    # For H2, if we normalized above we still may want to log
+    if [[ "$db_type" == "h2" && -n "${DB_DATABASE:-}" ]]; then
+        debug "Final H2 DB identifier: $DB_DATABASE"
+    fi
     configure_database "$db_type"
 
     # Find the appropriate driver JAR
