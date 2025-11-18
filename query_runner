@@ -929,8 +929,8 @@ validate_database_security() {
                 fi
                 
                 # Check for potential credential injection in URL
-                if [[ "$db_connection_string" =~ [@?&]([^&=]*)=([^&]*) ]]; then
-                    local param_name="${BASH_REMATCH[1]}"
+                local url_param_regex='[?&]([^&=]*)=([^&]*)'
+                if [[ "$db_connection_string" =~ $url_param_regex ]]; then
                     local param_value="${BASH_REMATCH[2]}"
                     
                     # URL decode the values for validation
