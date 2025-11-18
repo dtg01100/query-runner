@@ -72,7 +72,7 @@ EOF
 test_cli_parameters() {
     echo "=== Testing CLI Parameter Validation ==="
     
-    # Read naughty strings and test each one
+    # Read naughty strings from official submodule and test each one
     while IFS= read -r naughty_string || [[ -n "$naughty_string" ]]; do
         # Skip empty lines and comments
         [[ -z "$naughty_string" || "$naughty_string" =~ ^# ]] && continue
@@ -81,7 +81,7 @@ test_cli_parameters() {
         escaped_string=$(printf '%q' "$naughty_string")
         
         # Test host parameter
-        if ! ./query_runner -t sqlite -h "$naughty_string" -d "$TEST_DB" -f text "SELECT 1" >/dev/null 2>&1; then
+        if ! ./query_runner -t sqlite -h "$escaped_string" -d "$TEST_DB" -f text "SELECT 1" >/dev/null 2>&1; then
             log_test "Host validation: $naughty_string" "PASS" "rejection" "rejected"
         else
             log_test "Host validation: $naughty_string" "FAIL" "rejection" "accepted"
@@ -101,7 +101,7 @@ test_cli_parameters() {
             log_test "User validation: $naughty_string" "FAIL" "rejection" "accepted"
         fi
         
-    done < naughty_strings.txt
+    done < naughty-strings-repo/blns.txt
 }
 
 # Test SQL query validation with naughty strings
@@ -134,7 +134,7 @@ test_sql_queries() {
             log_test "SQL injection attempt NOT blocked: ${naughty_string:0:50}..." "FAIL" "rejection" "accepted"
         fi
         
-    done < naughty_strings.txt
+    done < naughty-strings-repo/blns.txt
 }
 
 # Test environment file parsing with naughty strings
@@ -169,7 +169,7 @@ EOF
             log_test "Env file with naughty string: ${naughty_string:0:30}..." "FAIL" "rejection" "accepted"
         fi
         
-    done < naughty_strings.txt
+    done < naughty-strings-repo/blns.txt
     
     rm -f /tmp/naughty_env.env
 }
@@ -209,32 +209,24 @@ test_query_files() {
             log_test "Malicious query file NOT blocked: ${naughty_string:0:30}..." "FAIL" "rejection" "accepted"
         fi
         
-    done < naughty_strings.txt
+    done < naughty-strings-repo/blns.txt
     
     rm -f /tmp/naughty_query.sql /tmp/malicious_query.sql
 }
 
 # Download and set up naughty strings list
 setup_naughty_strings() {
-    echo "Setting up naughty strings test data..."
+    echo "Using official Big List of Naughty Strings from submodule..."
     
-    if [[ ! -f "naughty_strings.txt" ]]; then
-        echo "Downloading naughty strings list..."
-        if command -v curl >/dev/null 2>&1; then
-            curl -s -o naughty_strings.txt "https://raw.githubusercontent.com/minimaxir/big-list-of-naughty-strings/master/blns.csv" || {
-                echo "Failed to download naughty strings, creating minimal test set..."
-                create_minimal_naughty_strings
-            }
-        elif command -v wget >/dev/null 2>&1; then
-            wget -q -O naughty_strings.txt "https://raw.githubusercontent.com/minimaxir/big-list-of-naughty-strings/master/blns.csv" || {
-                echo "Failed to download naughty strings, creating minimal test set..."
-                create_minimal_naughty_strings
-            }
-        else
-            echo "No download tool available, creating minimal test set..."
-            create_minimal_naughty_strings
-        fi
+    if [[ ! -d "naughty-strings-repo" ]]; then
+        echo "Error: Big List of Naughty Strings submodule not found"
+        echo "Please run: git submodule update --init --recursive"
+        exit 1
     fi
+    
+    echo "✅ Using official naughty strings from submodule"
+    echo "   JSON format: $(wc -l < naughty-strings-repo/blns.json) entries"
+    echo "   Text format: $(wc -l < naughty-strings-repo/blns.txt) entries"
 }
 
 # Create a minimal set of naughty strings for testing
