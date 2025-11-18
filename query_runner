@@ -54,13 +54,56 @@ debug() {
     fi
 }
 
-# Normalize / harden file path handling for filesystem paths used by the script
-# - trims whitespace and CRLF characters
-# - expands leading ~ to $HOME
-# - canonicalizes path using realpath/readlink or fallback
-# - rejects strings containing control characters (NUL/newline/tab/carriage return) as unsafe
+# Enhanced path validation with stricter security controls
+validate_path_input() {
+    local path="$1"
+    local context="$2"  # "query", "database", "env", etc.
+    
+    # Reject null bytes and control characters
+    if printf '%s' "$path" | grep -qP '\x00|[\x01-\x1F\x7F]'; then
+        echo "Error: Invalid control characters in $context path" >&2
+        exit 1
+    fi
+    
+    # Length validation
+    if [[ ${#path} -gt 4096 ]]; then
+        echo "Error: $context path too long (maximum 4096 characters)" >&2
+        exit 1
+    fi
+    
+    # Check for suspicious patterns
+    case "$context" in
+        "query")
+            # Query files should not contain certain patterns
+            if [[ "$path" =~ \.\./ ]] || [[ "$path" =~ ~.*[/.].*\. ]]; then
+                echo "Error: Invalid query file path" >&2
+                exit 1
+            fi
+            ;;
+        "database")
+            # Database paths have specific restrictions
+            if [[ "$path" =~ \.\./ ]] && [[ ! "$path" =~ ^/ ]]; then
+                echo "Error: Invalid database path" >&2
+                exit 1
+            fi
+            ;;
+        "env"|"drivers")
+            # Environment and drivers paths
+            if [[ "$path" =~ \.\./ ]] && [[ ! "$path" =~ ^/ ]]; then
+                echo "Error: Invalid $context path" >&2
+                exit 1
+            fi
+            ;;
+    esac
+}
+
+# Enhanced normalize_query_file_path with better security
 normalize_query_file_path() {
     local path="$1"
+    
+    # Validate input first
+    validate_path_input "$path" "query"
+    
     # Reject CR and NUL characters explicitly, then trim whitespace
     # Detect NUL bytes if `od` is available
     if command -v od >/dev/null 2>&1; then
@@ -75,12 +118,14 @@ normalize_query_file_path() {
             return 1
         fi
     fi
+    
     # Reject any carriage returns or tabs or newline characters explicitly
     case "$path" in
         *$'\r'*|*$'\n'*|*$'\t'*)
             return 1
             ;;
     esac
+    
     # Trim leading/trailing whitespace (spaces and tabs)
     path=$(printf '%s' "$path" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
 
@@ -91,13 +136,17 @@ normalize_query_file_path() {
             ;;
     esac
 
-    # Expand ~ at beginning
+    # Expand ~ at beginning with validation
     if [[ "$path" == ~* ]]; then
         # expand ~ and ~user only for simple forms
         if [[ "$path" =~ ^~[a-zA-Z0-9_\-]+(/.*)?$ ]]; then
             # shell will expand ~user only when not quoted, so fallback to path as-is (no expansion)
             true
         else
+            # Validate that HOME exists and is accessible
+            if [[ -z "$HOME" ]] || [[ ! -d "$HOME" ]]; then
+                return 1
+            fi
             path="${path/#\~/$HOME}"
         fi
     fi
@@ -108,22 +157,48 @@ normalize_query_file_path() {
         return 0
     fi
 
+    # Security check: prevent access to sensitive directories
+    case "$path" in
+        /etc/*|/proc/*|/sys/*|/dev/*|/boot/*|/root/*|/bin/*|/sbin/*|/lib/*|/lib64/*)
+            echo "Error: Access to system directories is not allowed" >&2
+            return 1
+            ;;
+    esac
+
     # If path exists, canonicalize; otherwise return path as provided
     if [[ -e "$path" ]]; then
         if command -v realpath >/dev/null 2>&1; then
             local canonical
             canonical=$(realpath -m -- "$path" 2>/dev/null || true)
             if [[ -n "$canonical" ]]; then
-                printf '%s' "$canonical"
-                return 0
+                # Additional security check: ensure we're not escaping allowed directories
+                case "$canonical" in
+                    /etc/*|/proc/*|/sys/*|/dev/*|/boot/*|/root/*|/bin/*|/sbin/*|/lib/*|/lib64/*)
+                        echo "Error: Access to system directories is not allowed" >&2
+                        return 1
+                        ;;
+                    *)
+                        printf '%s' "$canonical"
+                        return 0
+                        ;;
+                esac
             fi
         fi
         if command -v readlink >/dev/null 2>&1; then
             local canonical2
             canonical2=$(readlink -f -- "$path" 2>/dev/null || true)
             if [[ -n "$canonical2" ]]; then
-                printf '%s' "$canonical2"
-                return 0
+                # Additional security check for readlink result
+                case "$canonical2" in
+                    /etc/*|/proc/*|/sys/*|/dev/*|/boot/*|/root/*|/bin/*|/sbin/*|/lib/*|/lib64/*)
+                        echo "Error: Access to system directories is not allowed" >&2
+                        return 1
+                        ;;
+                    *)
+                        printf '%s' "$canonical2"
+                        return 0
+                        ;;
+                esac
             fi
         fi
         # Fallback to absolute via cd
@@ -132,14 +207,32 @@ normalize_query_file_path() {
         base=$(basename -- "$path")
         if cd -- "$dir" 2>/dev/null; then
             abs="$PWD/$base"
-            printf '%s' "$abs"
-            return 0
+            # Security check for fallback result
+            case "$abs" in
+                /etc/*|/proc/*|/sys/*|/dev/*|/boot/*|/root/*|/bin/*|/sbin/*|/lib/*|/lib64/*)
+                    echo "Error: Access to system directories is not allowed" >&2
+                    return 1
+                    ;;
+                *)
+                    printf '%s' "$abs"
+                    return 0
+                    ;;
+            esac
         fi
     fi
 
     # If not found or canonicalization fails, return the trimmed path (may be relative)
-    printf '%s' "$path"
-    return 0
+    # But validate it doesn't contain dangerous patterns
+    case "$path" in
+        *../*)
+            echo "Error: Path traversal attempt detected" >&2
+            return 1
+            ;;
+        *)
+            printf '%s' "$path"
+            return 0
+            ;;
+    esac
 }
 
 # Generic wrapper for normalizing filesystem paths that can be used for both
@@ -211,6 +304,98 @@ check_java_availability() {
     return 1
 }
 
+# Enhanced error handling with information leakage prevention
+safe_exit() {
+    local exit_code="$1"
+    local message="$2"
+    local sensitive_context="$3"
+    
+    # Sanitize error messages to prevent information leakage
+    if [[ -n "$message" ]]; then
+        # Remove potentially sensitive information from error messages
+        message=$(echo "$message" | \
+            sed -E 's/(password|passwd|pwd)[[:space:]]*[:=][[:space:]]*[^[:space:],;]+/\1=******/gi' | \
+            sed -E 's/(user|username|uid)[[:space:]]*[:=][[:space:]]*[^[:space:],;]+/\1=******/gi' | \
+            sed -E 's/(host|server|hostname)[[:space:]]*[:=][[:space:]]*[^[:space:],;]+/\1=******/gi' | \
+            sed -E 's/jdbc:[^[:space:]]+/jdbc:*** CONNECTION_STRING ***/gi' | \
+            sed -E 's/(localhost|127\.0\.0\.1|::1)/***HOST***/gi')
+        
+        # Only show detailed error messages in debug mode
+        if [[ "${DEBUG:-0}" != "1" && "${QUERY_RUNNER_DEBUG:-0}" != "1" ]]; then
+            # In non-debug mode, show generic messages
+            case "$sensitive_context" in
+                "database"|"connection"|"jdbc")
+                    echo "Error: Database connection failed" >&2
+                    ;;
+                "query"|"sql")
+                    echo "Error: Query execution failed" >&2
+                    ;;
+                "file"|"path")
+                    echo "Error: File operation failed" >&2
+                    ;;
+                "input"|"validation")
+                    echo "Error: Input validation failed" >&2
+                    ;;
+                *)
+                    echo "Error: Operation failed" >&2
+                    ;;
+            esac
+        else
+            # In debug mode, show sanitized but more detailed messages
+            echo "Error: $message" >&2
+        fi
+    fi
+    
+    exit "$exit_code"
+}
+
+# Enhanced error handling function that prevents information leakage
+handle_error() {
+    local error_type="$1"
+    local error_message="$2"
+    local exit_code="${3:-1}"
+    
+    case "$error_type" in
+        "database_connection")
+            if [[ "${DEBUG:-0}" != "1" && "${QUERY_RUNNER_DEBUG:-0}" != "1" ]]; then
+                echo "Error: Unable to connect to database" >&2
+            else
+                echo "Error: Database connection failed: $error_message" >&2
+            fi
+            ;;
+        "sql_execution")
+            if [[ "${DEBUG:-0}" != "1" && "${QUERY_RUNNER_DEBUG:-0}" != "1" ]]; then
+                echo "Error: SQL query execution failed" >&2
+            else
+                echo "Error: SQL execution failed: $error_message" >&2
+            fi
+            ;;
+        "input_validation")
+            echo "Error: Input validation failed: $error_message" >&2
+            ;;
+        "file_access")
+            if [[ "${DEBUG:-0}" != "1" && "${QUERY_RUNNER_DEBUG:-0}" != "1" ]]; then
+                echo "Error: File access denied" >&2
+            else
+                echo "Error: File operation failed: $error_message" >&2
+            fi
+            ;;
+        "security_violation")
+            echo "Error: Security policy violation: $error_message" >&2
+            ;;
+        *)
+            if [[ "${DEBUG:-0}" != "1" && "${QUERY_RUNNER_DEBUG:-0}" != "1" ]]; then
+                echo "Error: Operation failed" >&2
+            else
+                echo "Error: $error_message" >&2
+            fi
+            ;;
+    esac
+    
+    exit "$exit_code"
+}
+
+# Replace existing error handling with secure versions
 download_standalone_jdk() {
     local java_version="21"
     local java_url="https://api.adoptium.net/v3/binary/latest/${java_version}/ga/linux/x64/jdk/hotspot/normal/adoptium"
@@ -222,20 +407,16 @@ download_standalone_jdk() {
         read -p "Do you want to download a standalone JDK? (y/n) " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            echo "Java is required to run this script. Aborting." >&2
-            exit 1
+            handle_error "dependency" "Java is required to run this script" 1
         fi
 
         echo "Downloading standalone JDK..." >&2
         if ! curl -L -o "$java_archive" "$java_url" 2>/dev/null; then
-            echo "Error: Failed to download JDK from $java_url" >&2
-            exit 1
+            handle_error "download" "Failed to download JDK from $java_url" 1
         fi
         mkdir -p "$java_dir"
         if ! tar -xzf "$java_archive" -C "$java_dir" --strip-components=1 2>/dev/null; then
-            echo "Error: Failed to extract JDK archive" >&2
-            rm -f "$java_archive"
-            exit 1
+            handle_error "extract" "Failed to extract JDK archive" 1
         fi
         rm -f "$java_archive"
     fi
@@ -245,9 +426,7 @@ download_standalone_jdk() {
 
     # Verify the downloaded Java works
     if ! "$JAVA_BIN" -version >/dev/null 2>&1 || ! "$JAVAC_BIN" -version >/dev/null 2>&1; then
-        echo "Error: Downloaded JDK is not functional" >&2
-        rm -rf "$java_dir"
-        exit 1
+        handle_error "validation" "Downloaded JDK is not functional" 1
     fi
 }
 
@@ -407,18 +586,15 @@ Options:
     -d, --database DATABASE Database name (overrides .env)
     -u, --user USER         Database user (overrides .env)
     -P, --password PASSWORD Database password (overrides .env)
-    -e, --env-file FILE     Custom environment file (default: .env)
-    --drivers-dir DIR       JDBC drivers directory (default: ./drivers)
-    --list-drivers          List available database drivers and exit
-    --test-connection       Test database connection and exit
-    -v, --verbose           Enable verbose debug output (same as QUERY_RUNNER_DEBUG=1)
-    --debug                 Alias for --verbose
-    --download-driver TYPE  Download JDBC driver for TYPE (mysql, postgresql, h2, sqlite, sqlserver)
-    --allow-union-tables TABLES  Comma-separated list of tables allowed in UNION queries
-    --retry-max-attempts N     Maximum number of connection retry attempts (default: 1)
-    --retry-backoff-factor F   Exponential backoff factor for retries (default: 2.0)
-    --retry-initial-delay D    Initial delay in milliseconds before first retry (default: 1000)
-    -h, --help              Show this help message
+-e, --env-file FILE     Custom environment file (default: .env)
+     --drivers-dir DIR       JDBC drivers directory (default: ./drivers)
+     --list-drivers          List available database drivers and exit
+     --test-connection       Test database connection and exit
+     -v, --verbose           Enable verbose debug output (same as QUERY_RUNNER_DEBUG=1)
+     --debug                 Alias for --verbose
+     --download-driver TYPE  Download JDBC driver for TYPE (mysql, postgresql, h2, sqlite, sqlserver)
+     --allow-union-tables TABLES  Comma-separated list of tables allowed in UNION queries
+     -h, --help              Show this help message
     --                      End of options; next argument is interpreted as the query file (even if it starts with '-').
 
 Examples:
@@ -435,45 +611,129 @@ EOF
     exit 1
 }
 
+# Enhanced UNION safety detection with better pattern matching
 check_union_safety() {
     local query="$1"
     local normalized_query
-    normalized_query=$(echo "$query" | tr '[:upper:]' '[:lower:]' | sed 's/--.*$//' | sed 's/\s\+/ /g' | xargs)
+    local union_pattern_detected=false
+    
+    # Normalize query: lowercase, remove comments, collapse whitespace
+    normalized_query=$(echo "$query" | tr '[:upper:]' '[:lower:]' | sed 's/--.*$//' | sed 's/\/\*.*\*\///g' | sed 's/\s\+/ /g' | xargs)
+
+    debug "Checking UNION safety for normalized query: $normalized_query"
 
     # Allow UNION in safe contexts:
     # 1. WITH clauses (CTEs) - safe self-contained operations
     # 2. UNION ALL within same table - safe for data deduplication
     # 3. Explicitly allowed by user flag
+    # 4. Subqueries that are clearly contained
 
     # Check for UNION in CTE context (safe)
     if [[ "$normalized_query" =~ with[[:space:]]+.*[[:space:]]+union[[:space:]]+(all[[:space:]]+)?select ]]; then
+        debug "Allowing UNION in CTE context"
         return 0  # Allow UNION and UNION ALL in CTEs
     fi
 
     # Check for UNION ALL (safer than UNION DISTINCT)
     if [[ "$normalized_query" =~ union[[:space:]]+all[[:space:]]+select ]]; then
-        return 0  # Allow UNION ALL (less risky)
+        # Still need to validate the tables involved
+        debug "UNION ALL detected, checking table safety"
+        union_pattern_detected=true
     fi
 
-    # Check for UNION between same table (safe)
-    if [[ "$normalized_query" =~ union[[:space:]]+select[[:space:]]+from[[:space:]]+([a-z_][a-z0-9_]*)[[:space:]]+where[[:space:]]+.*[[:space:]]+union[[:space:]]+select[[:space:]]+from[[:space:]]+\1[[:space:]] ]]; then
-        return 0  # Allow UNION within same table
+    # Check for basic UNION (more risky)
+    if [[ "$normalized_query" =~ [^a-zA-Z0-9_]union[^a-zA-Z0-9_].*select ]]; then
+        debug "Basic UNION detected, checking table safety"
+        union_pattern_detected=true
     fi
 
-    # Check for explicit whitelist flag
-    if [[ -n "${ALLOW_UNION_TABLES:-}" ]]; then
-        local allowed_tables
-        IFS=',' read -ra allowed_tables <<< "$ALLOW_UNION_TABLES"
-        for table in "${allowed_tables[@]}"; do
-            table=$(echo "$table" | xargs)  # trim whitespace
-            if [[ "$normalized_query" =~ (union.*from.*$table|from.*$table.*union) ]]; then
-                return 0  # Allow UNION for whitelisted tables
+    # If we detected a UNION pattern, do deeper analysis
+    if [[ "$union_pattern_detected" == true ]]; then
+        # Extract table names from the query for analysis
+        local tables_in_query=()
+        
+        # Pattern to extract table names from FROM and JOIN clauses
+        # This is a simplified extraction - real-world queries can be more complex
+        while IFS= read -r table_name; do
+            if [[ -n "$table_name" ]]; then
+                # Clean up the table name
+                table_name=$(echo "$table_name" | sed 's/[`,;().]*//g' | xargs)
+                if [[ -n "$table_name" && ! "$table_name" =~ ^(select|from|join|where|and|or|not|in|null|true|false|as|on|using|group|order|limit|offset|union|intersect|except|with)$ ]]; then
+                    tables_in_query+=("$table_name")
+                fi
             fi
-        done
+        done < <(echo "$normalized_query" | grep -oE 'from[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*|join[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*' | sed 's/.*[[:space:]]//' || true)
+
+        debug "Extracted tables from query: ${tables_in_query[*]}"
+
+        # Check for UNION between same table (safe)
+        if [[ ${#tables_in_query[@]} -eq 2 ]] && [[ "${tables_in_query[0]}" == "${tables_in_query[1]}" ]]; then
+            debug "Allowing UNION within same table: ${tables_in_query[0]}"
+            return 0  # Allow UNION within same table
+        fi
+
+        # Check for UNION between multiple different tables (risky)
+        if [[ ${#tables_in_query[@]} -gt 1 ]]; then
+            local unique_tables=($(printf '%s\n' "${tables_in_query[@]}" | sort -u))
+            if [[ ${#unique_tables[@]} -gt 1 ]]; then
+                debug "Multiple different tables detected in UNION: ${unique_tables[*]}"
+                
+                # Check for explicit whitelist flag
+                if [[ -n "${ALLOW_UNION_TABLES:-}" ]]; then
+                    local allowed_tables
+                    IFS=',' read -ra allowed_tables <<< "$ALLOW_UNION_TABLES"
+                    local all_allowed=true
+                    
+                    for table in "${unique_tables[@]}"; do
+                        local table_allowed=false
+                        for allowed_table in "${allowed_tables[@]}"; do
+                            allowed_table=$(echo "$allowed_table" | xargs)  # trim whitespace
+                            if [[ "$table" == "$allowed_table" ]]; then
+                                table_allowed=true
+                                break
+                            fi
+                        done
+                        if [[ "$table_allowed" == false ]]; then
+                            all_allowed=false
+                            break
+                        fi
+                    done
+                    
+                    if [[ "$all_allowed" == true ]]; then
+                        debug "All tables in UNION are whitelisted: $ALLOW_UNION_TABLES"
+                        return 0  # Allow UNION for whitelisted tables
+                    else
+                        debug "Some tables not in whitelist: allowed=$ALLOW_UNION_TABLES, found=${unique_tables[*]}"
+                    fi
+                fi
+                
+                # If we reach here, the UNION is not allowed
+                echo "Error: UNION queries combining data from multiple different tables are not allowed by default." >&2
+                echo "Found tables: ${unique_tables[*]}" >&2
+                echo "For safe UNION operations, use:" >&2
+                echo "  1. UNION ALL with the same table" >&2
+                echo "  2. UNION in WITH clauses (CTEs)" >&2
+                echo "  3. --allow-union-tables=table1,table2 flag for trusted tables" >&2
+                echo "  4. Ensure all tables in the UNION are explicitly whitelisted" >&2
+                exit 1
+            fi
+        fi
+
+        # Check for complex subquery patterns that might be trying to bypass detection
+        if [[ "$normalized_query" =~ \([[:space:]]*select.*union ]] || [[ "$normalized_query" =~ select.*\(.*union ]]; then
+            debug "Complex subquery with UNION detected, performing additional validation"
+            
+            # Count the number of UNION occurrences
+            local union_count=$(echo "$normalized_query" | grep -o "union" | wc -l)
+            if [[ $union_count -gt 1 ]]; then
+                echo "Error: Multiple UNION operations detected - this is not allowed for security reasons." >&2
+                exit 1
+            fi
+        fi
     fi
 
-    # Default: Block risky UNION operations
-    echo "Error: UNION queries combining data from multiple sources are not allowed by default." >&2
+    # If we haven't returned by now, the UNION pattern is not safe
+    echo "Error: UNION queries are not allowed by default due to security concerns." >&2
     echo "For safe UNION operations, use:" >&2
     echo "  1. UNION ALL with the same table" >&2
     echo "  2. UNION in WITH clauses (CTEs)" >&2
@@ -481,11 +741,62 @@ check_union_safety() {
     exit 1
 }
 
+# Enhanced query normalization with better error handling
+normalize_query_content() {
+    local query="$1"
+    local normalized_query
+    
+    # Normalize query: lowercase, remove comments, collapse whitespace
+    # Use perl for more robust processing that handles edge cases
+    if ! normalized_query=$(echo "$query" | perl -ne 'print lc' 2>/dev/null); then
+        echo "Error: Failed to normalize query content" >&2
+        echo "The query contains invalid characters or formatting issues." >&2
+        exit 1
+    fi
+    
+    if ! normalized_query=$(echo "$normalized_query" | perl -pe 's/--.*?$//g; s/\/\*.*?\*\///g; s/\s+/ /g;' 2>/dev/null); then
+        echo "Error: Failed to process query comments and whitespace" >&2
+        echo "The query contains malformed comments or special characters." >&2
+        exit 1
+    fi
+    
+    # Trim whitespace
+    normalized_query=$(echo "$normalized_query" | xargs 2>/dev/null || echo "")
+    
+    if [[ -z "$normalized_query" ]]; then
+        echo "Error: Query is empty or contains only whitespace/comments" >&2
+        echo "Please provide a valid SQL query." >&2
+        exit 1
+    fi
+    
+    printf '%s' "$normalized_query"
+}
+
 check_read_only() {
     local query="$1"
     local normalized_query
-    # Normalize query: lowercase, remove comments, collapse whitespace
-    normalized_query=$(echo "$query" | perl -ne 'print lc' | perl -pe 's/--.*?$//g; s/\/\*.*?\*\///g; s/\s+/ /g;' | xargs)
+    local query_length
+    
+    # Input length validation - prevent extremely long queries that could cause DoS
+    query_length=${#query}
+    if [[ $query_length -gt 1048576 ]]; then  # 1MB limit
+        echo "Error: Query too long (maximum 1MB)" >&2
+        echo "Please reduce the query size and try again." >&2
+        exit 1
+    fi
+    
+    # Remove null bytes and sanitize control characters, but allow common ones in string literals
+    if printf '%s' "$query" | grep -qP '\x00'; then
+        echo "Error: Query contains invalid null bytes" >&2
+        echo "Please remove any binary data from the query." >&2
+        exit 1
+    fi
+    
+    # Normalize query with enhanced error handling
+    normalized_query=$(normalize_query_content "$query") || {
+        # The error message is already printed by normalize_query_content
+        exit 1
+    }
 
     # Check for dangerous patterns anywhere in the query
     local dangerous_patterns=(
@@ -516,6 +827,7 @@ check_read_only() {
                 check_union_safety "$query"
             else
                 echo "Error: Only read-only queries are allowed. Detected potentially dangerous pattern: $pattern" >&2
+                echo "Please use only SELECT, WITH, SHOW, DESCRIBE, EXPLAIN, or PRAGMA statements." >&2
                 exit 1
             fi
         fi
@@ -523,13 +835,16 @@ check_read_only() {
 
     # Check for multiple statements (semicolon separation)
     if [[ "$normalized_query" == *";"* ]]; then
-echo "Error: Multiple SQL statements are not allowed" >&2
+        echo "Error: Multiple SQL statements are not allowed" >&2
+        echo "Each query must be a single SQL statement without semicolons." >&2
         exit 1
     fi
 
     # Query must start with a read-only operation
     if [[ ! "$normalized_query" =~ ^[[:space:]]*(select|with|show|describe|explain|pragma)[[:space:]] ]]; then
-echo "Error: Query must start with a read-only operation (SELECT, WITH, SHOW, DESCRIBE, EXPLAIN, PRAGMA)" >&2
+        echo "Error: Query must start with a read-only operation" >&2
+        echo "Supported operations: SELECT, WITH, SHOW, DESCRIBE, EXPLAIN, PRAGMA" >&2
+        echo "Example: SELECT * FROM users WHERE id = 1" >&2
         exit 1
     fi
 }
@@ -569,9 +884,109 @@ echo "$db_type"
     return 1
 }
 
+# Validate JDBC connection parameters
+validate_jdbc_params() {
+    local db_type="$1"
+    local host="${2:-}"
+    local port="${3:-}"
+    local database="${4:-}"
+    local user="${5:-}"
+    local password="${6:-}"
+    
+    # Validate database type (already done in CLI validation)
+    if ! [[ "$db_type" =~ ^(mysql|postgresql|oracle|sqlserver|db2|h2|sqlite)$ ]]; then
+        echo "Error: Invalid database type: $db_type" >&2
+        exit 1
+    fi
+    
+    # Validate host (if provided)
+    if [[ -n "$host" ]]; then
+        # Length validation
+        if [[ ${#host} -gt 255 ]]; then
+            echo "Error: Host name too long" >&2
+            exit 1
+        fi
+        
+        # Basic hostname validation (allow localhost, IPs, and domain names)
+        if ! [[ "$host" =~ ^[a-zA-Z0-9.-]+$ ]]; then
+            echo "Error: Invalid host name format: $host" >&2
+            exit 1
+        fi
+        
+        # Reject potentially dangerous hosts
+        case "$host" in
+            /.*|.*\.\..*|.*\`.*|.*\$.*|.*\!.*)
+                echo "Error: Invalid host name: $host" >&2
+                exit 1
+                ;;
+        esac
+    fi
+    
+    # Validate port (if provided)
+    if [[ -n "$port" ]]; then
+        if ! [[ "$port" =~ ^[0-9]+$ ]] || [[ $port -lt 1 ]] || [[ $port -gt 65535 ]]; then
+            echo "Error: Invalid port number: $port" >&2
+            exit 1
+        fi
+    fi
+    
+    # Validate database name/path
+    if [[ -n "$database" ]]; then
+        case "$db_type" in
+            "sqlite"|"h2")
+                # For file-based databases, validate the path
+                if [[ "$database" != ":memory:" ]] && [[ "$database" != file:* ]] && [[ "$database" != jdbc:sqlite:* ]]; then
+                    # Validate as file path
+                    if ! validate_path_input "$database" "database"; then
+                        echo "Error: Invalid database path: $database" >&2
+                        exit 1
+                    fi
+                fi
+                ;;
+            *)
+                # For server-based databases, validate database name
+                if [[ ${#database} -gt 64 ]]; then
+                    echo "Error: Database name too long" >&2
+                    exit 1
+                fi
+                # Basic database name validation
+                if ! [[ "$database" =~ ^[a-zA-Z0-9_/.-]+$ ]]; then
+                    echo "Error: Invalid database name: $database" >&2
+                    exit 1
+                fi
+                ;;
+        esac
+    fi
+    
+    # Validate user (if provided)
+    if [[ -n "$user" ]]; then
+        if [[ ${#user} -gt 64 ]]; then
+            echo "Error: User name too long" >&2
+            exit 1
+        fi
+        # Basic username validation
+        if ! [[ "$user" =~ ^[a-zA-Z0-9_@.-]+$ ]]; then
+            echo "Error: Invalid user name: $user" >&2
+            exit 1
+        fi
+    fi
+    
+    # Validate password length (but don't validate content for security)
+    if [[ -n "$password" ]]; then
+        if [[ ${#password} -gt 1024 ]]; then
+            echo "Error: Password too long" >&2
+            exit 1
+        fi
+    fi
+}
+
+# Enhanced database configuration with validation
 configure_database() {
     local db_type="$1"
-
+    
+    # Validate parameters before configuration
+    validate_jdbc_params "$db_type" "${DB_HOST:-}" "${DB_PORT:-}" "${DB_DATABASE:-}" "${DB_USER:-}" "${DB_PASSWORD:-}"
+    
     case "$db_type" in
         mysql)
             DB_PORT="${DB_PORT:-3306}"
@@ -622,7 +1037,6 @@ configure_database() {
             DB_PORT="${DB_PORT:-9092}"
             JDBC_DRIVER_CLASS="${JDBC_DRIVER_CLASS:-org.h2.Driver}"
             if [[ -z "${JDBC_URL:-}" ]]; then
-                local timeout="${DB_TIMEOUT:-30}"
                 JDBC_URL="jdbc:h2:tcp://${DB_HOST}:${DB_PORT}/${DB_DATABASE};loginTimeout=${timeout}"
             fi
             DRIVER_JAR="${DRIVER_JAR:-h2*.jar}"
@@ -640,6 +1054,67 @@ configure_database() {
             exit 1
             ;;
     esac
+    
+    # Validate JDBC URL format
+    if [[ -n "${JDBC_URL:-}" ]]; then
+        # Basic JDBC URL validation
+        if [[ ! "$JDBC_URL" =~ ^jdbc: ]]; then
+            echo "Error: Invalid JDBC URL format: $JDBC_URL" >&2
+            exit 1
+        fi
+        
+        # Check for potentially dangerous JDBC URL patterns
+        if [[ "$JDBC_URL" =~ [\$\`\\\<\>\&\|\;] ]]; then
+            echo "Error: JDBC URL contains potentially dangerous characters" >&2
+            exit 1
+        fi
+        
+        # Validate that the URL matches the expected database type
+        case "$db_type" in
+            mysql)
+                if [[ ! "$JDBC_URL" =~ ^jdbc:mysql: ]]; then
+                    echo "Error: JDBC URL does not match MySQL database type" >&2
+                    exit 1
+                fi
+                ;;
+            postgresql)
+                if [[ ! "$JDBC_URL" =~ ^jdbc:postgresql: ]]; then
+                    echo "Error: JDBC URL does not match PostgreSQL database type" >&2
+                    exit 1
+                fi
+                ;;
+            oracle)
+                if [[ ! "$JDBC_URL" =~ ^jdbc:oracle: ]]; then
+                    echo "Error: JDBC URL does not match Oracle database type" >&2
+                    exit 1
+                fi
+                ;;
+            sqlserver)
+                if [[ ! "$JDBC_URL" =~ ^jdbc:sqlserver: ]]; then
+                    echo "Error: JDBC URL does not match SQL Server database type" >&2
+                    exit 1
+                fi
+                ;;
+            db2)
+                if [[ ! "$JDBC_URL" =~ ^jdbc:db2: ]]; then
+                    echo "Error: JDBC URL does not match DB2 database type" >&2
+                    exit 1
+                fi
+                ;;
+            h2)
+                if [[ ! "$JDBC_URL" =~ ^jdbc:h2: ]]; then
+                    echo "Error: JDBC URL does not match H2 database type" >&2
+                    exit 1
+                fi
+                ;;
+            sqlite)
+                if [[ ! "$JDBC_URL" =~ ^jdbc:sqlite: ]]; then
+                    echo "Error: JDBC URL does not match SQLite database type" >&2
+                    exit 1
+                fi
+                ;;
+        esac
+    fi
 }
 
 find_driver_jar() {
@@ -759,24 +1234,81 @@ test_connection() {
 }
 
 load_env() {
-    if [[ ! -f "$ENV_FILE" ]]; then
-echo "Warning: .env file not found at $ENV_FILE" >&2
-echo "You can specify connection details via command line options" >&2
+    local env_file_to_use="$ENV_FILE"
+    
+    # Use custom env file if specified
+    if [[ -n "${CLI_ENV_FILE:-}" ]]; then
+        env_file_to_use="$CLI_ENV_FILE"
+    fi
+    
+    # Validate env file path first
+    if ! normalize_fs_path "$env_file_to_use" >/dev/null 2>&1; then
+        echo "Error: Invalid environment file path: $env_file_to_use" >&2
+        exit 1
+    fi
+    
+    if [[ ! -f "$env_file_to_use" ]]; then
+        echo "Warning: Environment file not found at $env_file_to_use" >&2
+        echo "You can specify connection details via command line options" >&2
     else
+        # Secure environment file parsing
         set -a
-        # shellcheck source=/dev/null
-        source "$ENV_FILE"
+        
+        # Use a secure method to parse the environment file
+        # Only allow valid environment variable names and values
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            # Skip empty lines and comments
+            [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+            
+            # Skip lines that don't contain an equals sign
+            [[ ! "$line" =~ ^[^=]+=[^=]*$ ]] && continue
+            
+            # Extract variable name and value
+            local var_name="${line%%=*}"
+            local var_value="${line#*=}"
+            
+            # Validate variable name (only allow alphanumeric and underscore)
+            if ! [[ "$var_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+                debug "Skipping invalid environment variable name: $var_name"
+                continue
+            fi
+            
+            # Validate variable value length
+            if [[ ${#var_value} -gt 4096 ]]; then
+                echo "Error: Environment variable value too long: $var_name" >&2
+                exit 1
+            fi
+            
+            # Remove surrounding quotes if present
+            if [[ "$var_value" =~ ^[\"'](.*)[\"']$ ]]; then
+                var_value="${BASH_REMATCH[1]}"
+            fi
+            
+            # Set the environment variable safely
+            export "$var_name=$var_value"
+            
+            # Debug logging (sanitized)
+            case "$var_name" in
+                *PASSWORD*|*SECRET*|*KEY*)
+                    debug "Loaded environment variable: $var_name=******"
+                    ;;
+                *)
+                    debug "Loaded environment variable: $var_name=$var_value"
+                    ;;
+            esac
+        done < "$env_file_to_use"
+        
         set +a
     fi
 
-    # Override with command line arguments if provided
+    # Override with command line arguments if provided (already validated)
     DB_HOST="${CLI_HOST:-${DB_HOST:-localhost}}"
     DB_PORT="${CLI_PORT:-${DB_PORT:-}}"
     DB_DATABASE="${CLI_DATABASE:-${DB_DATABASE:-}}"
     DB_USER="${CLI_USER:-${DB_USER:-}}"
     DB_PASSWORD="${CLI_PASSWORD:-${DB_PASSWORD:-}}"
 
-# Auto-detect or use specified database type
+    # Auto-detect or use specified database type (already validated)
     local db_type
     if [[ -n "${CLI_TYPE:-}" ]]; then
         db_type="$CLI_TYPE"
@@ -789,6 +1321,7 @@ echo "You can specify connection details via command line options" >&2
         fi
     fi
     debug "Using database type: $db_type"
+    
     # If using SQLite or H2, normalize DB_DATABASE path (unless in-memory or file: URI)
     if [[ -n "${DB_DATABASE:-}" && ("$db_type" == "sqlite" || ("$db_type" == "h2" && ("${DB_DATABASE}" == ~* || "${DB_DATABASE}" == /* || "${DB_DATABASE}" == */* || "${DB_DATABASE}" == ./*))) ]]; then
         case "${DB_DATABASE}" in
@@ -822,17 +1355,18 @@ echo "You can specify connection details via command line options" >&2
                 ;;
         esac
     fi
+    
     # For H2, if we normalized above we still may want to log
     if [[ "$db_type" == "h2" && -n "${DB_DATABASE:-}" ]]; then
         debug "Final H2 DB identifier: $DB_DATABASE"
     fi
     configure_database "$db_type"
 
-    # Find the appropriate driver JAR
+    # Find the appropriate driver JAR (already validated)
     JAR_FILE=$(find_driver_jar "$DRIVER_JAR")
     debug "Using driver: $(basename "$JAR_FILE")"
 
-    # Validate required variables
+    # Validate required variables (already done for CLI, now for env vars)
     if [[ "$db_type" != "sqlite" ]]; then
         required_vars=("DB_HOST" "DB_USER" "DB_PASSWORD")
         for var in "${required_vars[@]}"; do
@@ -844,7 +1378,7 @@ echo "You can specify connection details via command line options" >&2
     fi
 
     if [[ -z "${DB_DATABASE:-}" && "$db_type" != "sqlite" ]]; then
-echo "Error: Database name is required" >&2
+        echo "Error: Database name is required" >&2
         exit 1
     fi
 }
@@ -862,12 +1396,10 @@ execute_query() {
 
     # Check for pre-compiled class first
     local precompiled_class
-    local use_precompiled=false
     local compilation_dir
 
     if precompiled_class=$(get_precompiled_class); then
         compilation_dir=$(dirname "$precompiled_class")
-        use_precompiled=true
         debug "Using precompiled class in $compilation_dir"
     else
         # Initialize cache and check for valid cached compilation
@@ -1155,7 +1687,117 @@ if ! check_java_availability; then
     download_standalone_jdk
 fi
 
-# Main script logic
+# Enhanced validate_cli_option with better error messages
+validate_cli_option() {
+    local option="$1"
+    local value="$2"
+    
+    # Reject null bytes
+    if printf '%s' "$value" | grep -qP '\x00'; then
+        echo "Error: Invalid null bytes in $option value" >&2
+        echo "Please remove any binary data from the $option parameter." >&2
+        exit 1
+    fi
+    
+    # Length validation for security (more reasonable limits)
+    local value_length=${#value}
+    case "$option" in
+        "host"|"user"|"password")
+            if [[ $value_length -gt 1024 ]]; then
+                echo "Error: $option value too long (maximum 1024 characters)" >&2
+                echo "Please reduce the $option length and try again." >&2
+                exit 1
+            fi
+            # For host, allow common characters but reject dangerous ones
+            if [[ "$option" == "host" ]]; then
+                if [[ "$value" =~ [\\\<\>\&\|\;\`] ]]; then
+                    echo "Error: Invalid characters in host name" >&2
+                    echo "Host names should contain only letters, numbers, dots, and hyphens." >&2
+                    exit 1
+                fi
+            fi
+            ;;
+        "database")
+            if [[ $value_length -gt 2048 ]]; then
+                echo "Error: Database value too long (maximum 2048 characters)" >&2
+                echo "Please reduce the database name/path length and try again." >&2
+                exit 1
+            fi
+            # Allow database names with reasonable characters
+            if [[ "$value" =~ [\\\<\>\&\|\;\`] ]]; then
+                echo "Error: Invalid characters in database name" >&2
+                echo "Database names should not contain special shell characters." >&2
+                exit 1
+            fi
+            ;;
+        "port")
+            if [[ $value_length -gt 5 ]]; then
+                echo "Error: Port value too long" >&2
+                echo "Port numbers should be 1-5 digits long." >&2
+                exit 1
+            fi
+            # Validate port is numeric
+            if ! [[ "$value" =~ ^[0-9]+$ ]] || [[ $value -lt 1 ]] || [[ $value -gt 65535 ]]; then
+                echo "Error: Invalid port number: $value" >&2
+                echo "Port numbers must be between 1 and 65535." >&2
+                exit 1
+            fi
+            ;;
+        "format")
+            if [[ $value_length -gt 20 ]]; then
+                echo "Error: Format value too long" >&2
+                echo "Output format names should be shorter than 20 characters." >&2
+                exit 1
+            fi
+            # Validate format is one of the allowed values
+            if ! [[ "$value" =~ ^(text|csv|json|pretty)$ ]]; then
+                echo "Error: Invalid format. Supported: text, csv, json, pretty" >&2
+                echo "Please choose one of the supported output formats." >&2
+                exit 1
+            fi
+            ;;
+        "type")
+            if [[ $value_length -gt 20 ]]; then
+                echo "Error: Database type value too long" >&2
+                echo "Database type names should be shorter than 20 characters." >&2
+                exit 1
+            fi
+            # Validate database type
+            if ! [[ "$value" =~ ^(mysql|postgresql|oracle|sqlserver|db2|h2|sqlite)$ ]]; then
+                echo "Error: Invalid database type. Supported: mysql, postgresql, oracle, sqlserver, db2, h2, sqlite" >&2
+                echo "Please choose one of the supported database types." >&2
+                exit 1
+            fi
+            ;;
+        "env-file"|"drivers-dir")
+            # Validate file system paths
+            if ! normalize_fs_path "$value" >/dev/null 2>&1; then
+                echo "Error: Invalid path for $option: $value" >&2
+                echo "Please provide a valid file system path." >&2
+                echo "Paths should not contain control characters or binary data." >&2
+                exit 1
+            fi
+            ;;
+        "allow-union-tables")
+            if [[ $value_length -gt 2048 ]]; then
+                echo "Error: Union tables list too long" >&2
+                echo "Please reduce the number of tables in the whitelist." >&2
+                exit 1
+            fi
+            # Validate table names contain only safe characters (more permissive)
+            if [[ "$value" =~ [\\\<\>\&\|\;\`] ]]; then
+                echo "Error: Invalid characters in table names for allow-union-tables" >&2
+                echo "Table names should not contain shell metacharacters." >&2
+                exit 1
+            fi
+            ;;
+    esac
+    
+    # Return the validated value
+    printf '%s' "$value"
+}
+
+# Initialize CLI variables
 CLI_HOST=""
 CLI_PORT=""
 CLI_DATABASE=""
@@ -1165,12 +1807,10 @@ CLI_TYPE=""
 CLI_FORMAT="text"
 CLI_ENV_FILE=""
 ALLOW_UNION_TABLES=""
-RETRY_MAX_ATTEMPTS=1
-RETRY_BACKOFF_FACTOR=2.0
-RETRY_INITIAL_DELAY=1000
 DOWNLOAD_DRIVER=""
 QUERY_FILE=""
 
+# Enhanced command line parsing with validation
 while [[ $# -gt 0 ]]; do
     case $1 in
         --)
@@ -1183,39 +1823,75 @@ while [[ $# -gt 0 ]]; do
             break
             ;;
         -f|--format)
-            CLI_FORMAT="$2"
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --format requires a value" >&2
+                usage
+            fi
+            CLI_FORMAT=$(validate_cli_option "format" "$2")
             shift 2
             ;;
         -t|--type)
-            CLI_TYPE="$2"
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --type requires a value" >&2
+                usage
+            fi
+            CLI_TYPE=$(validate_cli_option "type" "$2")
             shift 2
             ;;
         -h|--host)
-            CLI_HOST="$2"
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --host requires a value" >&2
+                usage
+            fi
+            CLI_HOST=$(validate_cli_option "host" "$2")
             shift 2
             ;;
         -p|--port)
-            CLI_PORT="$2"
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --port requires a value" >&2
+                usage
+            fi
+            CLI_PORT=$(validate_cli_option "port" "$2")
             shift 2
             ;;
         -d|--database)
-            CLI_DATABASE="$2"
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --database requires a value" >&2
+                usage
+            fi
+            CLI_DATABASE=$(validate_cli_option "database" "$2")
             shift 2
             ;;
         -u|--user)
-            CLI_USER="$2"
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --user requires a value" >&2
+                usage
+            fi
+            CLI_USER=$(validate_cli_option "user" "$2")
             shift 2
             ;;
         -P|--password)
-            CLI_PASSWORD="$2"
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --password requires a value" >&2
+                usage
+            fi
+            CLI_PASSWORD=$(validate_cli_option "password" "$2")
             shift 2
             ;;
         -e|--env-file)
-            CLI_ENV_FILE="$2"
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --env-file requires a value" >&2
+                usage
+            fi
+            CLI_ENV_FILE=$(validate_cli_option "env-file" "$2")
             shift 2
             ;;
         --drivers-dir)
-            DRIVERS_DIR="$2"
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --drivers-dir requires a value" >&2
+                usage
+            fi
+            DRIVERS_DIR=$(validate_cli_option "drivers-dir" "$2")
             shift 2
             ;;
         --list-drivers)
@@ -1228,36 +1904,27 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         --download-driver)
-            DOWNLOAD_DRIVER="$2"
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --download-driver requires a value" >&2
+                usage
+            fi
+            DOWNLOAD_DRIVER=$(validate_cli_option "type" "$2")
             shift 2
             ;;
-        --allow-union-tables)
-            ALLOW_UNION_TABLES="$2"
+--allow-union-tables)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --allow-union-tables requires a value" >&2
+                usage
+            fi
+            ALLOW_UNION_TABLES=$(validate_cli_option "allow-union-tables" "$2")
             shift 2
             ;;
-        --retry-max-attempts)
-            RETRY_MAX_ATTEMPTS="$2"
-            shift 2
-            ;;
-        --retry-backoff-factor)
-            RETRY_BACKOFF_FACTOR="$2"
-            shift 2
-            ;;
-        --retry-initial-delay)
-            RETRY_INITIAL_DELAY="$2"
-            shift 2
-            ;;
-        -v|--verbose)
-            CLI_VERBOSE=1
-            DEBUG=1
-            shift
-            ;;
-        --debug)
+--debug)
             CLI_DEBUG=1
             DEBUG=1
             shift
             ;;
-        -h|--help)
+        --help)
             usage
             ;;
         -*)
@@ -1265,6 +1932,11 @@ while [[ $# -gt 0 ]]; do
             usage
             ;;
         *)
+            # Validate query file path
+            if ! normalize_query_file_path "$1" >/dev/null 2>&1; then
+                echo "Error: Invalid query file path: $1" >&2
+                exit 1
+            fi
             QUERY_FILE="$1"
             shift
             ;;
@@ -1288,23 +1960,55 @@ load_env
 # Get query
 if [[ -n "$QUERY_FILE" ]]; then
     # Normalize/harden path
-    normalized_query_file=$(normalize_query_file_path "$QUERY_FILE") || true
-    if [[ -z "$normalized_query_file" ]]; then
+    normalized_query_file=$(normalize_query_file_path "$QUERY_FILE") || {
         echo "Error: Invalid or unsafe query file path: $QUERY_FILE" >&2
+        echo "Please check the file path and ensure it contains only valid characters." >&2
         exit 1
-    fi
+    }
+    
     if [[ "$normalized_query_file" == "-" ]]; then
         # Read from stdin if explicit - provided
-        query=$(cat -)
+        query=$(cat -) || {
+            echo "Error: Failed to read from stdin" >&2
+            exit 1
+        }
     else
         if [[ ! -f "$normalized_query_file" ]]; then
             echo "Error: Query file not found: $normalized_query_file" >&2
+            echo "Please check the file path and ensure the file exists." >&2
             exit 1
         fi
-        query=$(cat -- "$normalized_query_file")
+        
+        if [[ ! -r "$normalized_query_file" ]]; then
+            echo "Error: Cannot read query file: $normalized_query_file" >&2
+            echo "Please check file permissions." >&2
+            exit 1
+        fi
+        
+        query=$(cat -- "$normalized_query_file") || {
+            echo "Error: Failed to read query file: $normalized_query_file" >&2
+            echo "Please check file permissions and ensure the file is not corrupted." >&2
+            exit 1
+        }
     fi
 else
-    query=$(cat)
+    # Read from stdin with proper error handling
+    if ! query=$(cat -) 2>/dev/null; then
+        if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
+            echo "Error: Failed to read query from stdin" >&2
+            echo "Please ensure input is properly formatted and not truncated." >&2
+            exit 1
+        fi
+        query=""
+    fi
+fi
+
+# Validate that we have a query
+if [[ -z "$query" ]]; then
+    echo "Error: No query provided" >&2
+    echo "Usage: $0 [OPTIONS] [QUERY_FILE]" >&2
+    echo "   or: echo 'SELECT * FROM table' | $0 [OPTIONS]" >&2
+    exit 1
 fi
 
 # Execute
