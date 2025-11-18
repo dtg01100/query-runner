@@ -865,6 +865,7 @@ echo "$db_type"
             *oracle*) echo "oracle"; return 0 ;;
             *sqlserver*) echo "sqlserver"; return 0 ;;
             *db2*) echo "db2"; return 0 ;;
+            *as400*) echo "db2"; return 0 ;;
             *h2*) echo "h2"; return 0 ;;
             *sqlite*) echo "sqlite"; return 0 ;;
         esac
@@ -1173,12 +1174,12 @@ configure_database() {
                     exit 1
                 fi
                 ;;
-            db2)
-                if [[ ! "$JDBC_URL" =~ ^jdbc:db2: ]]; then
-                    echo "Error: JDBC URL does not match DB2 database type" >&2
-                    exit 1
-                fi
-                ;;
+             db2)
+                 if [[ ! "$JDBC_URL" =~ ^jdbc:(db2|as400): ]]; then
+                     echo "Error: JDBC URL does not match DB2/AS400 database type" >&2
+                     exit 1
+                 fi
+                 ;;
             h2)
                 if [[ ! "$JDBC_URL" =~ ^jdbc:h2: ]]; then
                     echo "Error: JDBC URL does not match H2 database type" >&2
