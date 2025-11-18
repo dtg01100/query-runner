@@ -54,6 +54,94 @@ debug() {
     fi
 }
 
+# Normalize / harden file path handling for query file path
+# - trims whitespace and CRLF characters
+# - expands leading ~ to $HOME
+# - canonicalizes path using realpath/readlink or fallback
+# - rejects strings containing control characters (NUL/newline/tab/carriage return) as unsafe
+normalize_query_file_path() {
+    local path="$1"
+    # Reject CR and NUL characters explicitly, then trim whitespace
+    # Detect NUL bytes if `od` is available
+    if command -v od >/dev/null 2>&1; then
+        if printf '%s' "$path" | od -An -t x1 -v | grep -q -E '(^| )00($| )'; then
+            return 1
+        fi
+    else
+        # Fallback: detect control characters including carriage return via awk
+        if printf '%s' "$path" | awk '/[[:cntrl:]]/ { exit 1 }'; then
+            :
+        else
+            return 1
+        fi
+    fi
+    # Reject any carriage returns or tabs or newline characters explicitly
+    case "$path" in
+        *$'\r'*|*$'\n'*|*$'\t'*)
+            return 1
+            ;;
+    esac
+    # Trim leading/trailing whitespace (spaces and tabs)
+    path=$(printf '%s' "$path" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+
+    # Reject paths containing newline/tab (weird terminals)
+    case "$path" in
+        *$'\n'*|*$'\t'*)
+            return 1
+            ;;
+    esac
+
+    # Expand ~ at beginning
+    if [[ "$path" == ~* ]]; then
+        # expand ~ and ~user only for simple forms
+        if [[ "$path" =~ ^~[a-zA-Z0-9_\-]+(/.*)?$ ]]; then
+            # shell will expand ~user only when not quoted, so fallback to path as-is (no expansion)
+            true
+        else
+            path="${path/#\~/$HOME}"
+        fi
+    fi
+
+    # Fast path: '-' means stdin
+    if [[ "$path" == "-" ]]; then
+        printf '%s' "-"
+        return 0
+    fi
+
+    # If path exists, canonicalize; otherwise return path as provided
+    if [[ -e "$path" ]]; then
+        if command -v realpath >/dev/null 2>&1; then
+            local canonical
+            canonical=$(realpath -m -- "$path" 2>/dev/null || true)
+            if [[ -n "$canonical" ]]; then
+                printf '%s' "$canonical"
+                return 0
+            fi
+        fi
+        if command -v readlink >/dev/null 2>&1; then
+            local canonical2
+            canonical2=$(readlink -f -- "$path" 2>/dev/null || true)
+            if [[ -n "$canonical2" ]]; then
+                printf '%s' "$canonical2"
+                return 0
+            fi
+        fi
+        # Fallback to absolute via cd
+        local dir base abs
+        dir=$(dirname -- "$path")
+        base=$(basename -- "$path")
+        if cd -- "$dir" 2>/dev/null; then
+            abs="$PWD/$base"
+            printf '%s' "$abs"
+            return 0
+        fi
+    fi
+
+    # If not found or canonicalization fails, return the trimmed path (may be relative)
+    printf '%s' "$path"
+    return 0
+}
+
 is_cache_valid() {
     local cache_key="$1"
     local cache_path
@@ -323,6 +411,7 @@ Options:
     --retry-backoff-factor F   Exponential backoff factor for retries (default: 2.0)
     --retry-initial-delay D    Initial delay in milliseconds before first retry (default: 1000)
     -h, --help              Show this help message
+    --                      End of options; next argument is interpreted as the query file (even if it starts with '-').
 
 Examples:
     echo "SELECT * FROM users LIMIT 10" | $(basename "$0")
@@ -1040,6 +1129,15 @@ QUERY_FILE=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --)
+            # End of options; treat the next argument as the query file (even if it starts with -)
+            shift
+            if [[ $# -ge 1 ]]; then
+                QUERY_FILE="$1"
+                shift
+            fi
+            break
+            ;;
         -f|--format)
             CLI_FORMAT="$2"
             shift 2
@@ -1145,11 +1243,22 @@ load_env
 
 # Get query
 if [[ -n "$QUERY_FILE" ]]; then
-    if [[ ! -f "$QUERY_FILE" ]]; then
-        echo "Error: Query file not found: $QUERY_FILE" >&2
+    # Normalize/harden path
+    normalized_query_file=$(normalize_query_file_path "$QUERY_FILE") || true
+    if [[ -z "$normalized_query_file" ]]; then
+        echo "Error: Invalid or unsafe query file path: $QUERY_FILE" >&2
         exit 1
     fi
-    query=$(cat "$QUERY_FILE")
+    if [[ "$normalized_query_file" == "-" ]]; then
+        # Read from stdin if explicit - provided
+        query=$(cat -)
+    else
+        if [[ ! -f "$normalized_query_file" ]]; then
+            echo "Error: Query file not found: $normalized_query_file" >&2
+            exit 1
+        fi
+        query=$(cat -- "$normalized_query_file")
+    fi
 else
     query=$(cat)
 fi

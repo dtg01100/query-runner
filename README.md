@@ -201,6 +201,12 @@ Options:
 
 ```bash
 ./query_runner -e production.env query.sql
+
+Note: If your query file starts with a hyphen ("-something.sql"), pass a `--` sentinel first to stop option parsing:
+
+```bash
+./query_runner -- -weird-filename.sql
+```
 ```
 
 ## Output Formats

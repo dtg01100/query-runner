@@ -261,6 +261,23 @@ echo "SELECT * FROM users WHERE email IS NOT NULL" | ./query_runner
 **Problem:** Driver requires additional native libraries
 **Solution:** Download platform-specific native libraries or use pure Java drivers
 
+## Filename and Path Edge Cases
+
+The runner rejects query file paths that contain control characters or are otherwise malformed. These are considered unsafe inputs and will be rejected with an error message.
+
+Examples to test:
+
+```bash
+# Reject file names with tabs or newlines and carriage returns (control characters)
+./query_runner " /tmp/has\tname.sql "  # Should fail with an error message
+./query_runner " /tmp/has\nname.sql "  # Should fail with an error message
+
+# Use -- sentinel for filenames beginning with a hyphen
+printf "SELECT 1" > /tmp/-weird.sql
+./query_runner -- /tmp/-weird.sql
+```
+
+
 ## Security Validation
 
 ### Read-Only Query Enforcement
