@@ -977,6 +977,87 @@ initialize_database_connection() {
     debug "Database security validation passed for $db_type"
 }
 
+# Enhanced JDBC parameter validation
+validate_jdbc_params() {
+    local db_type="$1"
+    local db_host="$2"
+    local db_port="$3"
+    local db_database="$4"
+    local db_user="$5"
+    local db_password="$6"
+    
+    debug "Validating JDBC parameters for database type: $db_type"
+    
+    # For SQLite, parameters are optional
+    if [[ "$db_type" == "sqlite" ]]; then
+        if [[ -z "$db_database" ]]; then
+            echo "Error: Database file path is required for SQLite" >&2
+            exit 1
+        fi
+        # Validate SQLite database path
+        if [[ "$db_database" =~ ^/(etc|proc|sys|dev|boot|root|bin|sbin|lib|lib64)/ ]]; then
+            echo "Error: SQLite database path attempts to access system directories" >&2
+            exit 1
+        fi
+        return 0
+    fi
+    
+    # For other database types, validate required parameters
+    if [[ -z "$db_host" ]]; then
+        echo "Error: Database host is required for $db_type" >&2
+        exit 1
+    fi
+    
+    if [[ -n "$db_port" ]]; then
+        # Validate port is numeric and in valid range
+        if ! [[ "$db_port" =~ ^[0-9]+$ ]] || [[ $db_port -lt 1 ]] || [[ $db_port -gt 65535 ]]; then
+            echo "Error: Invalid port number: $db_port" >&2
+            echo "Port numbers must be between 1 and 65535" >&2
+            exit 1
+        fi
+    fi
+    
+    if [[ -z "$db_database" ]]; then
+        echo "Error: Database name is required for $db_type" >&2
+        exit 1
+    fi
+    
+    if [[ -z "$db_user" ]]; then
+        echo "Error: Database user is required for $db_type" >&2
+        exit 1
+    fi
+    
+    if [[ -z "$db_password" ]]; then
+        echo "Error: Database password is required for $db_type" >&2
+        exit 1
+    fi
+    
+    # Validate parameter values for injection attacks
+    local params_to_check=("$db_host" "$db_database" "$db_user")
+    local param_names=("host" "database" "user")
+    
+    for i in "${!params_to_check[@]}"; do
+        local param_value="${params_to_check[$i]}"
+        local param_name="${param_names[$i]}"
+        
+        # Check for potentially dangerous characters
+        if [[ "$param_value" =~ [\\\<\>\&\|\;\`] ]]; then
+            echo "Error: Invalid characters in $param_name: $param_value" >&2
+            echo "Parameter values must not contain shell metacharacters" >&2
+            exit 1
+        fi
+        
+        # Check for SQL injection patterns
+        if [[ "$param_value" =~ (UNION|SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|EXEC|xp_|sp_) ]]; then
+            echo "Error: Potentially dangerous pattern detected in $param_name: $param_value" >&2
+            echo "Parameter values must not contain SQL keywords" >&2
+            exit 1
+        fi
+    done
+    
+    debug "JDBC parameter validation passed for $db_type"
+}
+
 # Enhanced database configuration with validation
 configure_database() {
     local db_type="$1"
