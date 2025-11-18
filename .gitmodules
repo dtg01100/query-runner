@@ -1,0 +1,3 @@
+[submodule "naughty-strings-repo"]
+	path = naughty-strings-repo
+	url = https://github.com/minimaxir/big-list-of-naughty-strings.git
