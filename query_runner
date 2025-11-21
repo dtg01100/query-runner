@@ -1215,6 +1215,29 @@ find_driver_jar() {
     done < <(find "$SCRIPT_DIR" -name "*.jar" -type f -print0 2>/dev/null)
 
     if [[ ${#jar_files[@]} -eq 0 ]]; then
+        # Attempt to auto-download common drivers for missing cases (e.g., jt400 for AS/400/DB2)
+        if echo "$driver_pattern" | grep -qi "jt400\|jt400*.jar\|db2jcc"; then
+            echo "Warning: JDBC driver not found for pattern '$driver_pattern'. Attempting to download jt400 driver..." >&2
+            if download_driver db2; then
+                # Retry search after download
+                jar_files=()
+                if [[ -d "$DRIVERS_DIR" ]]; then
+                    for pattern in $driver_pattern; do
+                        while IFS= read -r -d '' jar; do
+                            jar_files+=("$jar")
+                        done < <(find "$DRIVERS_DIR" -name "$pattern" -type f -print0 2>/dev/null)
+                    done
+                fi
+                while IFS= read -r -d '' jar; do
+                    jar_files+=("$jar")
+                done < <(find "$SCRIPT_DIR" -name "*.jar" -type f -print0 2>/dev/null)
+            else
+                echo "Warning: Automatic download of jt400 driver failed or was skipped." >&2
+            fi
+        fi
+    fi
+
+    if [[ ${#jar_files[@]} -eq 0 ]]; then
 echo "Error: No JDBC driver found matching pattern: $driver_pattern" >&2
 echo "Please place the appropriate JDBC driver JAR in $DRIVERS_DIR or $SCRIPT_DIR" >&2
         exit 1
@@ -1286,6 +1309,12 @@ download_driver() {
         sqlserver)
             url="https://repo1.maven.org/maven2/com/microsoft/sqlserver/mssql-jdbc/12.4.1.jre11/mssql-jdbc-12.4.1.jre11.jar"
             filename="mssql-jdbc-12.4.1.jre11.jar"
+            ;;
+        db2)
+            # jt400 isn't served via Maven central in a guaranteed stable path; try the OpenJTOpen release on Maven Central
+            # Use a commonly available jt400 artifact
+            url="https://repo1.maven.org/maven2/com/ibm/as400/jt400/10.5/jt400-10.5.jar"
+            filename="jt400-10.5.jar"
             ;;
         *)
             echo "Error: Unsupported driver type: $type" >&2
@@ -2067,11 +2096,21 @@ if [[ -n "$QUERY_FILE" ]]; then
             exit 1
         fi
         
-        query=$(cat -- "$normalized_query_file") || {
-            echo "Error: Failed to read query file: $normalized_query_file" >&2
-            echo "Please check file permissions and ensure the file is not corrupted." >&2
-            exit 1
-        }
+        # Read file into variable, stripping a UTF-8 BOM if present
+        # Some editors add a BOM (EF BB BF) which breaks normalization; remove it here.
+        if head -c 3 "$normalized_query_file" 2>/dev/null | od -An -t x1 | tr -d ' \t\n' | grep -qi '^efbbbf$'; then
+            query=$(sed -e '1s/^\xEF\xBB\xBF//' -- "$normalized_query_file") || {
+                echo "Error: Failed to read query file: $normalized_query_file" >&2
+                echo "Please check file permissions and ensure the file is not corrupted." >&2
+                exit 1
+            }
+        else
+            query=$(cat -- "$normalized_query_file") || {
+                echo "Error: Failed to read query file: $normalized_query_file" >&2
+                echo "Please check file permissions and ensure the file is not corrupted." >&2
+                exit 1
+            }
+        fi
     fi
 else
     # Read from stdin with proper error handling
