@@ -486,17 +486,313 @@ echo "SELECT * FROM large_table" | ./query_runner -f json > results.json
 echo "SELECT * FROM logs WHERE timestamp > '2024-01-01'" | ./query_runner -f text | process_logs.py
 ```
 
+## Daemon Mode Testing
+
+The query runner includes a persistent daemon mode for optimizing consecutive queries. This section covers testing the daemon functionality.
+
+### Daemon Overview
+
+The daemon runs as a persistent Java process that:
+- Maintains database connections in a connection pool
+- Listens on a Unix domain socket (`~/.query_runner/daemon.sock`)
+- Automatically starts on first query (unless `--no-daemon` is specified)
+- Times out after 5 minutes of inactivity
+
+### Quick Start
+
+```bash
+# Start daemon explicitly
+./query_runner --daemon-start
+
+# Check daemon status
+./query_runner --daemon-status
+
+# Stop daemon
+./query_runner --daemon-stop
+
+# Restart daemon
+./query_runner --daemon-restart
+
+# Run query (auto-starts daemon if not running)
+./query_runner "SELECT * FROM users"
+
+# Disable daemon mode
+./query_runner --no-daemon "SELECT * FROM users"
+```
+
+### Running Daemon Tests
+
+```bash
+# Install test dependencies
+apt-get install socat sqlite3
+
+# Run all daemon tests
+./test_daemon/test_daemon.sh
+
+# Run specific test categories
+./test_daemon/test_daemon.sh lifecycle    # Daemon lifecycle tests
+./test_daemon/test_daemon.sh protocol    # JSON protocol tests
+./test_daemon/test_daemon.sh fallback    # Fallback to single-query mode
+./test_daemon/test_daemon.sh pooling     # Connection pool tests
+./test_daemon/test_daemon.sh security    # Security validation tests
+./test_daemon/test_daemon.sh concurrency # Concurrent query tests
+./test_daemon/test_daemon.sh performance # Performance benchmarks
+```
+
+### Test Categories
+
+#### Lifecycle Tests (`test_daemon_lifecycle.sh`)
+
+Tests daemon start, stop, restart, auto-start, and socket cleanup:
+
+```bash
+./test_daemon/test_daemon.sh lifecycle
+```
+
+| Test | Description |
+|------|-------------|
+| `daemon_start_fresh` | Start daemon when not running |
+| `daemon_already_running` | Handle duplicate start gracefully |
+| `daemon_query_execution` | Execute queries through daemon |
+| `daemon_status_running` | Report running status correctly |
+| `daemon_stop` | Stop daemon and cleanup socket |
+| `daemon_stop_not_running` | Handle stop when not running |
+| `daemon_restart` | Restart with new PID |
+| `daemon_auto_start` | Auto-start on first query |
+| `daemon_socket_cleanup` | Clean stale socket on start |
+| `daemon_multiple_queries` | Handle multiple queries |
+| `daemon_query_different_formats` | Support all output formats |
+
+#### Protocol Tests (`test_daemon_protocol.sh`)
+
+Tests the JSON protocol over Unix socket:
+
+```bash
+./test_daemon/test_daemon.sh protocol
+```
+
+| Test | Description |
+|------|-------------|
+| `protocol_ping` | Ping/pong health check |
+| `protocol_query_valid` | Execute valid SQL queries |
+| `protocol_query_invalid_sql` | Return errors for bad SQL |
+| `protocol_query_blocked` | Block write operations |
+| `protocol_status` | Report daemon status |
+| `protocol_shutdown` | Graceful shutdown |
+| `protocol_malformed_json` | Handle invalid JSON |
+| `protocol_missing_type` | Require type field |
+| `protocol_unknown_type` | Reject unknown types |
+| `protocol_large_result` | Handle large result sets |
+| `protocol_special_chars` | Proper JSON escaping |
+| `protocol_null_values` | Handle NULL correctly |
+| `protocol_format_*` | Support all formats |
+
+#### Fallback Tests (`test_daemon_fallback.sh`)
+
+Tests graceful fallback to single-query mode:
+
+```bash
+./test_daemon/test_daemon.sh fallback
+```
+
+| Test | Description |
+|------|-------------|
+| `fallback_socket_missing` | Work when daemon unavailable |
+| `fallback_socket_busy` | Recover from stale socket |
+| `fallback_explicit_flag` | Honor `--no-daemon` |
+| `fallback_daemon_crash` | Recover from crash |
+| `fallback_connection_refused` | Handle connection errors |
+
+#### Connection Pooling Tests (`test_daemon_pooling.sh`)
+
+Tests connection pool behavior:
+
+```bash
+./test_daemon/test_daemon.sh pooling
+```
+
+| Test | Description |
+|------|-------------|
+| `pool_connection_reuse` | Reuse connections |
+| `pool_max_connections` | Handle pool exhaustion |
+| `pool_connection_validity` | Validate connections |
+| `pool_query_uses_pool` | Queries benefit from pool |
+| `pool_multiple_queries` | Multiple queries share pool |
+| `pool_sequential_queries` | Sequential queries reuse |
+
+#### Security Tests (`test_daemon_security.sh`)
+
+Tests daemon security controls:
+
+```bash
+./test_daemon/test_daemon.sh security
+```
+
+| Test | Description |
+|------|-------------|
+| `socket_file_permissions` | Socket has restricted perms |
+| `socket_directory_permissions` | Socket dir has restricted perms |
+| `query_injection_blocked` | Block SQL injection |
+| `query_union_detection` | Detect cross-table UNIONs |
+| `query_dangerous_keywords` | Block dangerous keywords |
+| `error_no_credentials` | No credentials in errors |
+| `query_length_limit` | Reject oversized queries |
+| `null_byte_blocked` | Reject null bytes |
+| `read_only_enforced` | Enforce read-only |
+
+#### Concurrency Tests (`test_daemon_concurrency.sh`)
+
+Tests parallel query execution:
+
+```bash
+./test_daemon/test_daemon.sh concurrency
+```
+
+| Test | Description |
+|------|-------------|
+| `concurrent_queries_5` | 5 parallel queries |
+| `concurrent_queries_10` | 10 parallel queries |
+| `concurrent_queries_20` | 20 parallel queries |
+| `concurrent_mixed_formats` | Different formats concurrently |
+| `concurrent_same_table` | Multiple queries on same table |
+| `concurrent_error_isolation` | Errors don't cascade |
+| `concurrent_daemon_stable` | Daemon remains stable |
+
+#### Performance Tests (`test_daemon_performance.sh`)
+
+Benchmarks daemon performance:
+
+```bash
+./test_daemon/test_daemon.sh performance
+```
+
+| Test | Target |
+|------|--------|
+| `perf_daemon_startup` | < 5 seconds |
+| `perf_first_query` | < 500ms |
+| `perf_subsequent_queries` | < 100ms avg |
+| `perf_cold_vs_warm` | > 2x speedup |
+| `perf_throughput` | > 5 QPS |
+| `perf_memory_baseline` | < 200MB |
+| `perf_query_latency_p50_p99` | p99 < 500ms |
+
+### Docker-Based Database Testing
+
+For multi-database testing, use Docker:
+
+```bash
+# Start test databases
+cd test_daemon/docker
+docker-compose up -d
+
+# Wait for databases to be ready
+sleep 10
+
+# Run tests with MySQL
+DB_TYPE=mysql DB_HOST=localhost DB_PORT=3307 \
+  DB_DATABASE=testdb DB_USER=root DB_PASSWORD=testpass123 \
+  ../../test_daemon.sh all
+
+# Run tests with PostgreSQL
+DB_TYPE=postgresql DB_HOST=localhost DB_PORT=5433 \
+  DB_DATABASE=testdb DB_USER=postgres DB_PASSWORD=testpass123 \
+  ../../test_daemon.sh all
+
+# Cleanup
+docker-compose down
+```
+
+### Test Fixtures
+
+Test database schema and data are in `test_daemon/fixtures/test_schema.sql`:
+
+```sql
+CREATE TABLE users (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT UNIQUE,
+    age INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE orders (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id),
+    amount REAL NOT NULL,
+    status TEXT DEFAULT 'pending'
+);
+
+CREATE TABLE products (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    price REAL NOT NULL,
+    stock INTEGER DEFAULT 0
+);
+```
+
+### Troubleshooting Tests
+
+**socat not found:**
+```bash
+apt-get install socat          # Debian/Ubuntu
+brew install socat              # macOS
+```
+
+**SQLite not found:**
+```bash
+apt-get install sqlite3         # Debian/Ubuntu
+brew install sqlite3            # macOS
+```
+
+**Daemon won't start:**
+```bash
+# Check logs
+cat ~/.query_runner/daemon.log
+
+# Manual start with debug
+DEBUG=1 ./query_runner --daemon-start
+```
+
+**Socket permission denied:**
+```bash
+# Remove stale socket
+rm -f ~/.query_runner/daemon.sock
+
+# Fix permissions
+chmod 700 ~/.query_runner
+```
+
+### Continuous Integration
+
+Example CI configuration for GitHub Actions:
+
+```yaml
+name: Daemon Tests
+
+on: [push, pull_request]
+
+jobs:
+  daemon-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y socat sqlite3 default-jdk
+      - name: Run daemon tests
+        run: ./test_daemon/test_daemon.sh all
+```
+
 ## Conclusion
 
-This testing framework provides a comprehensive approach to validate the query runner across different database types. The SQLite validation demonstrated:
+This testing framework provides comprehensive validation of the query runner daemon mode:
 
-- ✅ Reliable database connectivity
-- ✅ Accurate query execution  
-- ✅ Multiple output format support
-- ✅ Robust security controls
-- ✅ Proper error handling
-- ✅ **NEW:** Memory-efficient streaming for large datasets
+- **63 tests** across 7 categories
+- **SQLite** for fast local testing
+- **Docker** support for MySQL/PostgreSQL
+- **Automated** performance benchmarks
+- **Security** validation for all entry points
+- **Concurrency** testing up to 20 parallel queries
 
-The streaming implementation transforms the query runner from a small-dataset tool to an enterprise-scale data processing solution capable of handling millions of rows with constant memory usage.
-
-Use this guide to test new database types, validate changes, and ensure consistent behavior across all supported databases.
+All tests validate both the daemon functionality and maintain backward compatibility with single-query mode through robust fallback mechanisms.

@@ -593,7 +593,13 @@ Options:
      -v, --verbose           Enable verbose debug output (same as QUERY_RUNNER_DEBUG=1)
      --debug                 Alias for --verbose
      --download-driver TYPE  Download JDBC driver for TYPE (mysql, postgresql, h2, sqlite, sqlserver)
-     --allow-union-tables TABLES  Comma-separated list of tables allowed in UNION queries
+      --daemon               Enable daemon mode (auto-start if not running)
+      --no-daemon            Disable daemon mode, use single-query
+      --daemon-start         Start the daemon process
+      --daemon-stop          Stop the daemon process
+      --daemon-restart       Restart the daemon process
+      --daemon-status        Check daemon status
+      --allow-union-tables TABLES  Comma-separated list of tables allowed in UNION queries
      -h, --help              Show this help message
     --                      End of options; next argument is interpreted as the query file (even if it starts with '-').
 
@@ -1497,15 +1503,23 @@ load_env() {
 execute_query() {
     local query="$1"
     local format="$2"
+
+    check_read_only "$query"
+
+    if [[ "$DAEMON_MODE" != "off" ]]; then
+        local daemon_result
+        if daemon_result=$(execute_query_daemon "$query" "$format" 2>/dev/null); then
+            echo "$daemon_result"
+            return 0
+        fi
+        debug "Daemon not available, falling back to single-query mode"
+    fi
+
     local temp_dir
     temp_dir=$(mktemp -d)
     trap 'rm -rf "${temp_dir:-}"' EXIT
 
     local temp_java_file cache_key cached_class_file
-
-    check_read_only "$query"
-
-    # Check for pre-compiled class first
     local precompiled_class
     local compilation_dir
 
@@ -1919,6 +1933,7 @@ CLI_FORMAT="text"
 CLI_ENV_FILE=""
 ALLOW_UNION_TABLES=""
 DOWNLOAD_DRIVER=""
+DAEMON_ACTION=""
 QUERY_FILE=""
 
 # Enhanced command line parsing with validation
@@ -2030,9 +2045,33 @@ while [[ $# -gt 0 ]]; do
             ALLOW_UNION_TABLES=$(validate_cli_option "allow-union-tables" "$2")
             shift 2
             ;;
---debug)
+        --debug)
             CLI_DEBUG=1
             DEBUG=1
+            shift
+            ;;
+        --daemon)
+            DAEMON_MODE="auto"
+            shift
+            ;;
+        --no-daemon)
+            DAEMON_MODE="off"
+            shift
+            ;;
+        --daemon-start)
+            DAEMON_ACTION="start"
+            shift
+            ;;
+        --daemon-stop)
+            DAEMON_ACTION="stop"
+            shift
+            ;;
+        --daemon-restart)
+            DAEMON_ACTION="restart"
+            shift
+            ;;
+        --daemon-status)
+            DAEMON_ACTION="status"
             shift
             ;;
         --help)
@@ -2054,9 +2093,953 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+DAEMON_MODE="${DAEMON_MODE:-auto}"
+DAEMON_SOCKET="$HOME/.query_runner/daemon.sock"
+DAEMON_PORT_FILE="$HOME/.query_runner/daemon.port"
+DAEMON_PID_FILE="$HOME/.query_runner/daemon.pid"
+DAEMON_CLASS_DIR="$HOME/.query_runner/daemon_class"
+
+is_daemon_running() {
+    if [[ -S "$DAEMON_SOCKET" ]]; then
+        if [[ -f "$DAEMON_PID_FILE" ]]; then
+            local pid
+            pid=$(cat "$DAEMON_PID_FILE" 2>/dev/null || echo "")
+            if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+                return 0
+            fi
+        fi
+    fi
+    if [[ -f "$DAEMON_PORT_FILE" ]] && [[ -f "$DAEMON_PID_FILE" ]]; then
+        local pid port
+        pid=$(cat "$DAEMON_PID_FILE" 2>/dev/null || echo "")
+        port=$(cat "$DAEMON_PORT_FILE" 2>/dev/null || echo "")
+        if [[ -n "$pid" ]] && [[ -n "$port" ]] && kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+get_daemon_endpoint() {
+    if [[ -S "$DAEMON_SOCKET" ]]; then
+        echo "UNIX:$DAEMON_SOCKET"
+    elif [[ -f "$DAEMON_PORT_FILE" ]]; then
+        port=$(cat "$DAEMON_PORT_FILE" 2>/dev/null || echo "")
+        if [[ -n "$port" ]]; then
+            echo "INET:localhost:$port"
+        fi
+    fi
+}
+
+get_daemon_pid() {
+    if [[ -f "$DAEMON_PID_FILE" ]]; then
+        cat "$DAEMON_PID_FILE" 2>/dev/null
+    fi
+}
+
+start_daemon() {
+    if is_daemon_running; then
+        debug "Daemon already running (PID: $(get_daemon_pid))"
+        return 0
+    fi
+
+    debug "Starting daemon..."
+
+    mkdir -p "$HOME/.query_runner"
+
+    local classpath
+    classpath=$(build_classpath "$JAR_FILE")
+    classpath="$classpath:$DAEMON_CLASS_DIR"
+
+    if [[ ! -d "$DAEMON_CLASS_DIR" ]] || [[ -z "$(ls -A "$DAEMON_CLASS_DIR" 2>/dev/null)" ]]; then
+        mkdir -p "$DAEMON_CLASS_DIR"
+        local temp_dir
+        temp_dir=$(mktemp -d)
+        cat > "$temp_dir/QueryDaemon.java" << 'DAEMON_EOF'
+import java.io.*;
+import java.lang.reflect.*;
+import java.net.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.sql.*;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.regex.*;
+
+public class QueryDaemon {
+    private static final String SOCKET_PATH;
+    private static final String PID_FILE;
+    private static final long IDLE_TIMEOUT_MS = 300000L;
+    private static final int POOL_MAX_SIZE = 10;
+    private static final int POOL_MIN_IDLE = 2;
+    private static final long POOL_TIMEOUT_MS = 30000L;
+
+    static {
+        String baseDir = System.getProperty("user.home") + "/.query_runner";
+        SOCKET_PATH = baseDir + "/daemon.sock";
+        PID_FILE = baseDir + "/daemon.pid";
+    }
+
+    private Object serverChannel;
+    private final ExecutorService workerPool;
+    private final ScheduledExecutorService scheduler;
+    private final Properties config;
+    private volatile boolean running = true;
+    private volatile long lastActivityTime;
+    private ConnectionPool pool;
+    private ServerSocket listenerSocket;
+    private boolean useUnixSocket;
+
+    public QueryDaemon(Properties config) throws Exception {
+        this.config = config;
+        this.workerPool = Executors.newFixedThreadPool(POOL_MAX_SIZE);
+        this.scheduler = Executors.newScheduledThreadPool(2);
+        this.lastActivityTime = System.currentTimeMillis();
+
+        java.nio.file.Path socketPath = Paths.get(SOCKET_PATH);
+        Files.createDirectories(socketPath.getParent());
+
+        if (Files.exists(socketPath)) {
+            Files.delete(socketPath);
+        }
+
+        startListener();
+        writePidFile();
+        startIdleTimeout();
+    }
+
+    private void startListener() throws Exception {
+        try {
+            Class<?> unixServerSocketChannelClass = Class.forName("java.nio.channels.ServerSocketChannel");
+            Method openMethod = unixServerSocketChannelClass.getMethod("open");
+            Object serverChannelObj = openMethod.invoke(null);
+
+            Class<?> unixDomainSocketAddressClass = Class.forName("jdk.net.UnixDomainSocketAddress");
+            Method ofMethod = unixDomainSocketAddressClass.getMethod("of", String.class);
+            Object addressObj = ofMethod.invoke(null, SOCKET_PATH);
+
+            this.serverChannel = serverChannelObj;
+            Method bindMethod = serverChannelObj.getClass().getMethod("bind", SocketAddress.class);
+            bindMethod.invoke(serverChannelObj, addressObj);
+
+            Method configureBlockingMethod = serverChannelObj.getClass().getMethod("configureBlocking", boolean.class);
+            configureBlockingMethod.invoke(serverChannelObj, Boolean.TRUE);
+
+            this.listenerSocket = (ServerSocket) serverChannelObj.getClass()
+                .getMethod("socket").invoke(serverChannelObj);
+
+            this.useUnixSocket = true;
+            System.err.println("DEBUG: QueryDaemon started on " + SOCKET_PATH);
+        } catch (Exception e) {
+            System.err.println("DEBUG: Unix socket not available: " + e.getMessage());
+            System.err.println("DEBUG: Falling back to INET socket");
+            this.serverChannel = null;
+            this.listenerSocket = new ServerSocket(0);
+            this.useUnixSocket = false;
+            System.err.println("DEBUG: QueryDaemon started on port " + listenerSocket.getLocalPort());
+        }
+    }
+
+    private void writePidFile() throws IOException {
+        String pid = Long.toString(ProcessHandle.current().pid());
+        Files.writeString(Paths.get(PID_FILE), pid);
+    }
+
+    private void startIdleTimeout() {
+        scheduler.scheduleAtFixedRate(() -> {
+            if (running && System.currentTimeMillis() - lastActivityTime > IDLE_TIMEOUT_MS) {
+                System.err.println("DEBUG: Idle timeout reached, shutting down daemon");
+                shutdown();
+            }
+        }, 1000, 1000, TimeUnit.MILLISECONDS);
+    }
+
+    public void run() {
+        while (running) {
+            try {
+                Socket clientSocket;
+                if (useUnixSocket && serverChannel != null) {
+                    Method acceptMethod = serverChannel.getClass().getMethod("accept");
+                    Object clientChannel = acceptMethod.invoke(serverChannel);
+                    if (clientChannel == null) continue;
+                    Socket client = (Socket) clientChannel.getClass().getMethod("socket").invoke(clientChannel);
+                    clientSocket = client;
+                } else {
+                    clientSocket = listenerSocket.accept();
+                }
+
+                if (!running) {
+                    clientSocket.close();
+                    break;
+                }
+                lastActivityTime = System.currentTimeMillis();
+                workerPool.submit(() -> handleClient(clientSocket));
+
+            } catch (Exception e) {
+                if (running) {
+                    System.err.println("DEBUG: Accept error: " + e.getMessage());
+                }
+                break;
+            }
+        }
+    }
+
+    private void handleClient(Socket clientSocket) {
+        try {
+            BufferedReader reader = new BufferedReader(
+                new InputStreamReader(clientSocket.getInputStream(), StandardCharsets.UTF_8));
+            PrintWriter writer = new PrintWriter(
+                new OutputStreamWriter(clientSocket.getOutputStream(), StandardCharsets.UTF_8), true);
+
+            String line = reader.readLine();
+            if (line == null) return;
+
+            String response = processRequest(line.trim());
+            writer.println(response);
+
+        } catch (Exception e) {
+            System.err.println("DEBUG: Client handler error: " + e.getMessage());
+        } finally {
+            try { clientSocket.close(); } catch (IOException ignored) {}
+        }
+    }
+
+    private String processRequest(String requestJson) {
+        try {
+            Map<String, Object> request = parseJson(requestJson);
+            String type = (String) request.get("type");
+
+            switch (type) {
+                case "ping": return jsonResponse("ok", "pong", true);
+                case "shutdown": return handleShutdown();
+                case "status": return handleStatus();
+                case "query": return handleQuery(request);
+                default: return errorResponse("Unknown request type: " + type);
+            }
+        } catch (Exception e) {
+            return errorResponse("Invalid request: " + e.getMessage());
+        }
+    }
+
+    private String handleQuery(Map<String, Object> request) {
+        String sql = (String) request.get("sql");
+        String format = (String) request.getOrDefault("format", "text");
+
+        if (sql == null || sql.trim().isEmpty()) {
+            return errorResponse("SQL query is required");
+        }
+
+        if (sql.length() > 1048576) {
+            return errorResponse("Query too long (maximum 1MB)");
+        }
+
+        sql = sql.replaceAll("\\u0000|\\p{Cntrl}", "");
+
+        if (!isReadOnlyQuery(sql)) {
+            return errorResponse("Only read-only queries are allowed");
+        }
+
+        try {
+            if (pool == null) {
+                pool = new ConnectionPool(config);
+            }
+
+            try (Connection conn = pool.getConnection();
+                 Statement stmt = conn.createStatement();
+                 ResultSet rs = stmt.executeQuery(sql)) {
+
+                ResultSetMetaData meta = rs.getMetaData();
+                int columnCount = meta.getColumnCount();
+                List<String> columnNames = new ArrayList<>();
+                for (int i = 1; i <= columnCount; i++) {
+                    columnNames.add(meta.getColumnName(i));
+                }
+
+                StringBuilder result = new StringBuilder();
+                result.append("{\"status\":\"ok\",");
+                result.append("\"format\":\"").append(escapeJson(format)).append("\",");
+                result.append("\"columns\":[");
+                for (int i = 0; i < columnNames.size(); i++) {
+                    if (i > 0) result.append(",");
+                    result.append("\"").append(escapeJson(columnNames.get(i))).append("\"");
+                }
+                result.append("],");
+                result.append("\"data\":");
+
+                switch (format) {
+                    case "json":
+                        result.append(formatJson(rs, columnNames, columnCount));
+                        break;
+                    case "csv":
+                        result.append(formatCsv(rs, columnNames, columnCount));
+                        break;
+                    case "pretty":
+                        result.append(formatPretty(rs, columnNames, columnCount));
+                        break;
+                    default:
+                        result.append(formatText(rs, columnNames, columnCount));
+                }
+
+                result.append("}");
+                return result.toString();
+            }
+        } catch (SQLException e) {
+            return errorResponse("SQL Error: " + sanitizeError(e.getMessage()));
+        } catch (Exception e) {
+            return errorResponse("Error: " + e.getMessage());
+        }
+    }
+
+    private String formatText(ResultSet rs, List<String> columnNames, int columnCount) throws SQLException {
+        StringBuilder sb = new StringBuilder();
+        sb.append("[");
+        boolean firstRow = true;
+        while (rs.next()) {
+            if (!firstRow) sb.append(",");
+            firstRow = false;
+            sb.append("[");
+            for (int i = 0; i < columnCount; i++) {
+                if (i > 0) sb.append(",");
+                Object value = rs.getObject(i + 1);
+                if (value == null) {
+                    sb.append("null");
+                } else {
+                    sb.append("\"").append(escapeJson(value.toString())).append("\"");
+                }
+            }
+            sb.append("]");
+        }
+        sb.append("]");
+        return sb.toString();
+    }
+
+    private String formatJson(ResultSet rs, List<String> columnNames, int columnCount) throws SQLException {
+        StringBuilder sb = new StringBuilder();
+        sb.append("[");
+        boolean firstRow = true;
+        while (rs.next()) {
+            if (!firstRow) sb.append(",");
+            firstRow = false;
+            sb.append("{");
+            for (int i = 0; i < columnCount; i++) {
+                if (i > 0) sb.append(",");
+                sb.append("\"").append(escapeJson(columnNames.get(i))).append("\":");
+                Object value = rs.getObject(i + 1);
+                if (value == null) {
+                    sb.append("null");
+                } else if (value instanceof Number || value instanceof Boolean) {
+                    sb.append(value.toString());
+                } else {
+                    sb.append("\"").append(escapeJson(value.toString())).append("\"");
+                }
+            }
+            sb.append("}");
+        }
+        sb.append("]");
+        return sb.toString();
+    }
+
+    private String formatCsv(ResultSet rs, List<String> columnNames, int columnCount) throws SQLException {
+        StringBuilder sb = new StringBuilder();
+        sb.append("[[");
+        for (int i = 0; i < columnCount; i++) {
+            if (i > 0) sb.append(",");
+            sb.append("\"").append(escapeJson(columnNames.get(i))).append("\"");
+        }
+        sb.append("],");
+        boolean firstRow = true;
+        while (rs.next()) {
+            if (!firstRow) sb.append(",");
+            firstRow = false;
+            sb.append("[");
+            for (int i = 0; i < columnCount; i++) {
+                if (i > 0) sb.append(",");
+                Object value = rs.getObject(i + 1);
+                if (value == null) {
+                    sb.append("null");
+                } else {
+                    sb.append("\"").append(escapeJson(value.toString().replace("\"", "\"\""))).append("\"");
+                }
+            }
+            sb.append("]");
+        }
+        sb.append("]");
+        return sb.toString();
+    }
+
+    private String formatPretty(ResultSet rs, List<String> columnNames, int columnCount) throws SQLException {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        while (rs.next()) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            for (int i = 0; i < columnCount; i++) {
+                row.put(columnNames.get(i), rs.getObject(i + 1));
+            }
+            rows.add(row);
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"rows\":[");
+        boolean firstRow = true;
+        for (Map<String, Object> row : rows) {
+            if (!firstRow) sb.append(",");
+            firstRow = false;
+            sb.append("{");
+            boolean first = true;
+            for (Map.Entry<String, Object> entry : row.entrySet()) {
+                if (!first) sb.append(",");
+                first = false;
+                sb.append("\"").append(escapeJson(entry.getKey())).append("\":");
+                Object value = entry.getValue();
+                if (value == null) {
+                    sb.append("null");
+                } else {
+                    sb.append("\"").append(escapeJson(value.toString())).append("\"");
+                }
+            }
+            sb.append("}");
+        }
+        sb.append("],\"columnWidths\":[");
+        int[] widths = calculateColumnWidths(columnNames, rows);
+        for (int i = 0; i < widths.length; i++) {
+            if (i > 0) sb.append(",");
+            sb.append(widths[i]);
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
+    private int[] calculateColumnWidths(List<String> columnNames, List<Map<String, Object>> rows) {
+        int[] widths = new int[columnNames.size()];
+        for (int i = 0; i < columnNames.size(); i++) {
+            widths[i] = columnNames.get(i).length();
+        }
+        for (Map<String, Object> row : rows) {
+            for (int i = 0; i < columnNames.size(); i++) {
+                Object value = row.get(columnNames.get(i));
+                String str = value != null ? value.toString() : "NULL";
+                widths[i] = Math.max(widths[i], str.length());
+            }
+        }
+        return widths;
+    }
+
+    private String handleStatus() {
+        long uptime = System.currentTimeMillis() - lastActivityTime;
+        int activeConnections = pool != null ? pool.getActiveCount() : 0;
+        int idleConnections = pool != null ? pool.getIdleCount() : 0;
+        return String.format("{\"status\":\"ok\",\"uptime_ms\":%d,\"active_connections\":%d,\"idle_connections\":%d}",
+            uptime, activeConnections, idleConnections);
+    }
+
+    private String handleShutdown() {
+        running = false;
+        shutdown();
+        return "{\"status\":\"ok\",\"message\":\"Daemon shutdown complete\"}";
+    }
+
+    public void shutdown() {
+        running = false;
+        try {
+            if (listenerSocket != null) listenerSocket.close();
+            if (serverChannel != null) {
+                Method closeMethod = serverChannel.getClass().getMethod("close");
+                closeMethod.invoke(serverChannel);
+            }
+        } catch (Exception ignored) {}
+        workerPool.shutdown();
+        scheduler.shutdown();
+        try {
+            workerPool.awaitTermination(5, TimeUnit.SECONDS);
+            scheduler.awaitTermination(5, TimeUnit.SECONDS);
+        } catch (InterruptedException ignored) {}
+        if (pool != null) pool.shutdown();
+        try { Files.deleteIfExists(Paths.get(SOCKET_PATH)); } catch (IOException ignored) {}
+        try { Files.deleteIfExists(Paths.get(PID_FILE)); } catch (IOException ignored) {}
+    }
+
+    private boolean isReadOnlyQuery(String sql) {
+        String normalized = sql.toLowerCase().replaceAll("\\s+", " ").trim();
+        if (!normalized.matches("^(select|with|show|describe|explain|pragma)\\s.*")) {
+            return false;
+        }
+        if (normalized.contains("union") && !normalized.matches(".*union\\s+(all\\s+)?select.*")) {
+            return false;
+        }
+        return !normalized.contains("insert ") && !normalized.contains("update ") &&
+               !normalized.contains("delete ") && !normalized.contains("drop ") &&
+               !normalized.contains("create ") && !normalized.contains("alter ") &&
+               !normalized.contains("truncate ") && !normalized.contains("exec ") &&
+               !normalized.contains("execute ") && !normalized.contains("grant ") &&
+               !normalized.contains("revoke ") && !normalized.contains("commit ") &&
+               !normalized.contains("rollback ");
+    }
+
+    private Map<String, Object> parseJson(String json) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        String trimmed = json.trim();
+        if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+            throw new IllegalArgumentException("Invalid JSON object");
+        }
+        String content = trimmed.substring(1, trimmed.length() - 1);
+        int depth = 0;
+        int start = 0;
+        boolean inString = false;
+        boolean escaped = false;
+
+        for (int i = 0; i <= content.length(); i++) {
+            char c = i < content.length() ? content.charAt(i) : ',';
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (c == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (c == '"') {
+                inString = !inString;
+                continue;
+            }
+            if (inString) continue;
+
+            if (c == '{' || c == '[') depth++;
+            if (c == '}' || c == ']') depth--;
+            if (depth == 0 && (c == ',' || i == content.length())) {
+                String pair = content.substring(start, i).trim();
+                start = i + 1;
+                if (pair.isEmpty()) continue;
+                int colonPos = findColon(pair);
+                if (colonPos == -1) continue;
+                String key = pair.substring(0, colonPos).trim();
+                String value = pair.substring(colonPos + 1).trim();
+                result.put(unquote(key), parseValue(value));
+            }
+        }
+        return result;
+    }
+
+    private int findColon(String s) {
+        boolean inString = false;
+        boolean escaped = false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (c == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (c == '"') {
+                inString = !inString;
+                continue;
+            }
+            if (!inString && c == ':') return i;
+        }
+        return -1;
+    }
+
+    private Object parseValue(String value) {
+        if (value.startsWith("\"")) {
+            return unquote(value);
+        }
+        if (value.equals("true")) return Boolean.TRUE;
+        if (value.equals("false")) return Boolean.FALSE;
+        if (value.equals("null")) return null;
+        try {
+            if (value.contains(".")) {
+                return Double.parseDouble(value);
+            }
+            return Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            return value;
+        }
+    }
+
+    private String unquote(String s) {
+        if (s.startsWith("\"") && s.endsWith("\"") && s.length() >= 2) {
+            return s.substring(1, s.length() - 1).replace("\\\"", "\"").replace("\\\\", "\\");
+        }
+        return s;
+    }
+
+    private String escapeJson(String str) {
+        if (str == null) return "";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < str.length(); i++) {
+            char c = str.charAt(i);
+            switch (c) {
+                case '"': sb.append("\\\""); break;
+                case '\\': sb.append("\\\\"); break;
+                case '\n': sb.append("\\n"); break;
+                case '\r': sb.append("\\r"); break;
+                case '\t': sb.append("\\t"); break;
+                case '\b': sb.append("\\b"); break;
+                case '\f': sb.append("\\f"); break;
+                default:
+                    if (c < ' ' || c > 127) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+            }
+        }
+        return sb.toString();
+    }
+
+    private String sanitizeError(String msg) {
+        if (msg == null) return "Unknown error";
+        return msg.replaceAll("(?i)(password|passwd|pwd)\\s*[:=]\\s*[^\\s,;]+", "$1=******")
+                  .replaceAll("(?i)(user|username|uid)\\s*[:=]\\s*[^\\s,;]+", "$1=******")
+                  .replaceAll("(?i)(host|server)\\s*[:=]\\s*[^\\s,;]+", "$1=******");
+    }
+
+    private String jsonResponse(String status, String key, Object value) {
+        return String.format("{\"status\":\"%s\",\"%s\":%s}", status, key,
+            value instanceof String ? "\"" + escapeJson((String) value) + "\"" : value);
+    }
+
+    private String errorResponse(String message) {
+        return String.format("{\"status\":\"error\",\"message\":\"%s\"}", escapeJson(message));
+    }
+
+    static class ConnectionPool {
+        private final List<Connection> connections = new CopyOnWriteArrayList<>();
+        private final Properties config;
+        private int activeCount = 0;
+        private int idleCount = 0;
+
+        ConnectionPool(Properties config) {
+            this.config = config;
+            initializePool();
+        }
+
+        private void initializePool() {
+            for (int i = 0; i < POOL_MIN_IDLE; i++) {
+                Connection conn = createConnection();
+                if (conn != null) {
+                    connections.add(conn);
+                    idleCount++;
+                }
+            }
+        }
+
+        Connection getConnection() throws SQLException {
+            long start = System.currentTimeMillis();
+            while (System.currentTimeMillis() - start < POOL_TIMEOUT_MS) {
+                for (Connection conn : connections) {
+                    if (isValid(conn)) {
+                        connections.remove(conn);
+                        activeCount++;
+                        idleCount--;
+                        return conn;
+                    }
+                    connections.remove(conn);
+                }
+                if (connections.size() < POOL_MAX_SIZE) {
+                    Connection newConn = createConnection();
+                    if (newConn != null) {
+                        connections.add(newConn);
+                        idleCount++;
+                    }
+                }
+                if (connections.isEmpty()) {
+                    Connection conn = createConnection();
+                    if (conn != null) {
+                        connections.add(conn);
+                        idleCount++;
+                    }
+                }
+                if (!connections.isEmpty()) {
+                    Connection conn = connections.remove(0);
+                    activeCount++;
+                    idleCount--;
+                    return conn;
+                }
+                try { Thread.sleep(10); } catch (InterruptedException ignored) {}
+            }
+            throw new SQLException("Connection timeout");
+        }
+
+        void returnConnection(Connection conn) {
+            if (conn != null && isValid(conn)) {
+                connections.add(conn);
+                activeCount--;
+                idleCount++;
+            }
+        }
+
+        void shutdown() {
+            for (Connection conn : connections) {
+                try { conn.close(); } catch (SQLException ignored) {}
+            }
+            connections.clear();
+            idleCount = 0;
+            activeCount = 0;
+        }
+
+        int getActiveCount() { return activeCount; }
+        int getIdleCount() { return idleCount; }
+
+        private Connection createConnection() {
+            try {
+                Class.forName(config.getProperty("JDBC_DRIVER_CLASS"));
+                return DriverManager.getConnection(
+                    config.getProperty("JDBC_URL"),
+                    config.getProperty("DB_USER"),
+                    config.getProperty("DB_PASSWORD")
+                );
+            } catch (Exception e) {
+                System.err.println("DEBUG: Failed to create connection: " + e.getMessage());
+                return null;
+            }
+        }
+
+        private boolean isValid(Connection conn) {
+            try {
+                return conn != null && conn.isValid(5);
+            } catch (SQLException e) {
+                return false;
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        Properties config = new Properties();
+        config.setProperty("JDBC_URL", System.getenv("JDBC_URL"));
+        config.setProperty("JDBC_DRIVER_CLASS", System.getenv("JDBC_DRIVER_CLASS"));
+        config.setProperty("DB_USER", System.getenv("DB_USER"));
+        config.setProperty("DB_PASSWORD", System.getenv("DB_PASSWORD"));
+
+        try {
+            QueryDaemon daemon = new QueryDaemon(config);
+            daemon.run();
+        } catch (Exception e) {
+            System.err.println("DEBUG: Daemon failed: " + e.getMessage());
+            System.exit(1);
+        }
+    }
+}
+DAEMON_EOF
+        if ! javac_output=$("$JAVAC_BIN" -d "$DAEMON_CLASS_DIR" "$temp_dir/QueryDaemon.java" 2>&1); then
+            echo "Error: Failed to compile QueryDaemon: $javac_output" >&2
+            rm -rf "$temp_dir"
+            return 1
+        fi
+        rm -rf "$temp_dir"
+    fi
+
+    export JDBC_URL JDBC_DRIVER_CLASS DB_USER DB_PASSWORD QUERY_RUNNER_DEBUG
+    nohup "$JAVA_BIN" --enable-native-access=ALL-UNNAMED -cp "$classpath" QueryDaemon > "$HOME/.query_runner/daemon.log" 2>&1 &
+    local daemon_pid=$!
+    echo "$daemon_pid" > "$DAEMON_PID_FILE"
+
+    sleep 1
+
+    if kill -0 "$daemon_pid" 2>/dev/null; then
+        if [[ -S "$DAEMON_SOCKET" ]]; then
+            rm -f "$DAEMON_PORT_FILE" 2>/dev/null || true
+            debug "Daemon started with PID: $daemon_pid (Unix socket)"
+        else
+            local port
+            port=$(grep -oP 'started on port \K\d+' "$HOME/.query_runner/daemon.log" 2>/dev/null | tail -1 || echo "")
+            if [[ -n "$port" ]]; then
+                echo "$port" > "$DAEMON_PORT_FILE"
+                debug "Daemon started with PID: $daemon_pid (INET port $port)"
+            else
+                debug "Daemon started with PID: $daemon_pid"
+            fi
+        fi
+        return 0
+    else
+        echo "Error: Failed to start daemon" >&2
+        rm -f "$DAEMON_PID_FILE" "$DAEMON_PORT_FILE"
+        if [[ -f "$HOME/.query_runner/daemon.log" ]]; then
+            cat "$HOME/.query_runner/daemon.log" >&2
+        fi
+        return 1
+    fi
+}
+
+stop_daemon() {
+    if ! is_daemon_running; then
+        echo "Daemon is not running"
+        rm -f "$DAEMON_PID_FILE" "$DAEMON_SOCKET" "$DAEMON_PORT_FILE" 2>/dev/null || true
+        return 0
+    fi
+
+    local pid
+    pid=$(get_daemon_pid)
+    debug "Stopping daemon (PID: $pid)..."
+
+    if [[ -S "$DAEMON_SOCKET" ]]; then
+        echo '{"type":"shutdown"}' | timeout 5 socat - UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || true
+    elif [[ -f "$DAEMON_PORT_FILE" ]]; then
+        local port
+        port=$(cat "$DAEMON_PORT_FILE" 2>/dev/null || echo "")
+        if [[ -n "$port" ]]; then
+            echo '{"type":"shutdown"}' | timeout 5 nc localhost "$port" 2>/dev/null || true
+        fi
+    fi
+
+    sleep 0.5
+    if kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        sleep 0.5
+    fi
+
+    rm -f "$DAEMON_PID_FILE" "$DAEMON_SOCKET" "$DAEMON_PORT_FILE" 2>/dev/null || true
+    echo "Daemon stopped"
+}
+
+restart_daemon() {
+    stop_daemon
+    sleep 1
+    start_daemon
+}
+
+daemon_status() {
+    if is_daemon_running; then
+        local pid endpoint
+        pid=$(get_daemon_pid)
+        endpoint=$(get_daemon_endpoint)
+        echo "Daemon is running (PID: $pid, $endpoint)"
+        local response
+        if [[ -S "$DAEMON_SOCKET" ]]; then
+            response=$(echo '{"type":"status"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{"status":"error"}')
+        elif [[ -f "$DAEMON_PORT_FILE" ]]; then
+            local port
+            port=$(cat "$DAEMON_PORT_FILE" 2>/dev/null || echo "")
+            if [[ -n "$port" ]]; then
+                response=$(echo '{"type":"status"}' | timeout 2 nc localhost "$port" 2>/dev/null || echo '{"status":"error"}')
+            fi
+        fi
+        echo "Status: $response"
+        return 0
+    else
+        echo "Daemon is not running"
+        return 1
+    fi
+}
+
+execute_query_daemon() {
+    local query="$1"
+    local format="$2"
+
+    if ! is_daemon_running; then
+        if [[ "$DAEMON_MODE" == "off" ]]; then
+            return 1
+        fi
+        start_daemon || return 1
+    fi
+
+    local request="{\"type\":\"query\",\"sql\":$(printf '%s' "$query" | jq -Rs .),\"format\":\"$format\"}"
+    local response
+
+    if [[ -S "$DAEMON_SOCKET" ]]; then
+        response=$(echo "$request" | timeout 30 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null)
+    elif [[ -f "$DAEMON_PORT_FILE" ]]; then
+        local port
+        port=$(cat "$DAEMON_PORT_FILE" 2>/dev/null || echo "")
+        if [[ -n "$port" ]]; then
+            response=$(echo "$request" | timeout 30 nc localhost "$port" 2>/dev/null)
+        fi
+    fi
+
+    if [[ -z "$response" ]]; then
+        echo "Error: No response from daemon" >&2
+        return 1
+    fi
+
+    local status
+    status=$(echo "$response" | jq -r '.status' 2>/dev/null || echo "error")
+
+    if [[ "$status" == "ok" ]]; then
+        local output_format
+        output_format=$(echo "$response" | jq -r '.format' 2>/dev/null || echo "text")
+        local columns
+        columns=$(echo "$response" | jq -c '.columns' 2>/dev/null || echo "[]")
+        local data
+        data=$(echo "$response" | jq '.data' 2>/dev/null || echo "[]")
+
+        format_daemon_output "$output_format" "$columns" "$data"
+        return 0
+    else
+        local error_msg
+        error_msg=$(echo "$response" | jq -r '.message' 2>/dev/null || echo "Unknown error")
+        echo "Error: $error_msg" >&2
+        return 1
+    fi
+}
+
+format_daemon_output() {
+    local format="$1"
+    local columns="$2"
+    local data="$3"
+
+    case "$format" in
+        text)
+            local col_names
+            col_names=$(echo "$columns" | jq -r '.[]' 2>/dev/null | tr '\n' '\t')
+            if [[ -n "$col_names" ]]; then
+                echo "$col_names"
+            fi
+            echo "$data" | jq -r '.[] | .[]' 2>/dev/null | paste - - | tr '\t' '\n' | while IFS= read -r row; do
+                echo "$row"
+            done
+            ;;
+        json)
+            echo "$data"
+            ;;
+        csv)
+            local headers
+            headers=$(echo "$columns" | jq -r '.[]' 2>/dev/null | tr '\n' ',')
+            if [[ -n "$headers" ]]; then
+                echo "$headers"
+            fi
+            echo "$data" | jq -r '.[] | .[]' 2>/dev/null | paste - - | tr '\t' ',' | while IFS= read -r row; do
+                echo "$row"
+            done
+            ;;
+        pretty)
+            echo "$data" | jq '.'
+            ;;
+        *)
+            echo "$data"
+            ;;
+    esac
+}
+
 if [[ -n "$DOWNLOAD_DRIVER" ]]; then
     download_driver "$DOWNLOAD_DRIVER"
     exit 0
+fi
+
+if [[ -n "$DAEMON_ACTION" ]]; then
+    case "$DAEMON_ACTION" in
+        start)
+            load_env
+            start_daemon
+            exit $?
+            ;;
+        stop)
+            stop_daemon
+            exit $?
+            ;;
+        restart)
+            restart_daemon
+            exit $?
+            ;;
+        status)
+            daemon_status
+            exit $?
+            ;;
+        *)
+            echo "Unknown daemon action: $DAEMON_ACTION" >&2
+            exit 1
+            ;;
+    esac
 fi
 
 # Set DEBUG based on CLI flags or environment variable
