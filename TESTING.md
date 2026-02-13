@@ -10,6 +10,95 @@ This testing framework validates:
 - Output format rendering (text, CSV, JSON, pretty)
 - Error handling and security controls
 - Driver management and dependencies
+- Cache management and performance optimization
+- Path validation and security
+- Query normalization and content validation
+- UNION safety and cross-table query protection
+- CLI option parsing and validation
+- Environment file handling
+- Daemon mode operations
+
+## Test Suite Overview
+
+### Core Functionality Tests
+
+| Test Script | Description | Test Count |
+|------------|-------------|------------|
+| `test_input_validation.sh` | Basic input validation and sanitization | ~50+ |
+| `test_database_security.sh` | Database connection security | ~40+ |
+| `test_naughty_strings.sh` | Big List of Naughty Strings validation | ~100+ |
+| `test_official_naughty_strings.sh` | Official naughty strings test suite | ~200+ |
+| `test_focused_naughty.sh` | Focused malicious input tests | ~60+ |
+| `test_real_security_vectors.sh` | Real-world security attack vectors | ~80+ |
+
+### New Comprehensive Test Suites
+
+| Test Script | Description | Test Count |
+|------------|-------------|------------|
+| **`test_cache_management.sh`** | Cache initialization, validation, invalidation, cleanup | ~14 |
+| **`test_error_handling.sh`** | Error messages, credential redaction, info leakage prevention | ~12 |
+| **`test_path_validation.sh`** | Path normalization, system directory protection, traversal | ~15 |
+| **`test_query_normalization.sh`** | Query content validation, whitespace, comments, size limits | ~13 |
+| **`test_union_safety.sh`** | UNION detection, cross-table protection, --allow-union-tables | ~12 |
+| **`test_cli_options.sh`** | All CLI flags and options, validation, combinations | ~16 |
+| **`test_env_files.sh`** | Environment file parsing, comments, quotes, validation | ~17 |
+| **`test_output_formats.sh`** | NULL handling, escaping, Unicode, edge cases in all formats | ~13 |
+
+### Daemon Mode Tests
+
+| Test Script | Description | Test Count |
+|------------|-------------|------------|
+| `test_daemon/test_daemon.sh` | Master daemon test runner | Orchestrates all |
+| `test_daemon/test_daemon_lifecycle.sh` | Start, stop, restart, auto-start | ~11 |
+| `test_daemon/test_daemon_protocol.sh` | JSON protocol over Unix socket | ~14 |
+| `test_daemon/test_daemon_fallback.sh` | Graceful fallback to single-query mode | ~5 |
+| `test_daemon/test_daemon_pooling.sh` | Connection pool behavior | ~6 |
+| `test_daemon/test_daemon_security.sh` | Daemon security controls | ~9 |
+| `test_daemon/test_daemon_concurrency.sh` | Parallel query execution | ~7 |
+| `test_daemon/test_daemon_performance.sh` | Performance benchmarks | ~7 |
+| `test_daemon/test_daemon_coverage_gaps.sh` | Coverage gap tests | ~10+ |
+
+### Running All Tests
+
+```bash
+# Run all new comprehensive tests
+for test in test_cache_management.sh test_error_handling.sh test_path_validation.sh \
+            test_query_normalization.sh test_union_safety.sh test_cli_options.sh \
+            test_env_files.sh test_output_formats.sh; do
+    echo "Running $test..."
+    ./"$test" || exit 1
+done
+
+# Run master test suite (recommended)
+./run_all_tests.sh              # Run all core and interface tests
+./run_all_tests.sh core         # Core functionality only
+./run_all_tests.sh security     # Security tests only
+./run_all_tests.sh formats      # Interface and output tests
+./run_all_tests.sh --help       # See all options
+
+# Run individual test suites
+./test_cache_management.sh
+./test_error_handling.sh
+./test_path_validation.sh
+./test_query_normalization.sh
+./test_union_safety.sh
+./test_cli_options.sh
+./test_env_files.sh
+./test_output_formats.sh
+
+# Run daemon tests
+./test_daemon/test_daemon.sh all
+
+# Run security test suites
+./test_input_validation.sh
+./test_database_security.sh
+./test_naughty_strings.sh
+./test_official_naughty_strings.sh
+./test_real_security_vectors.sh
+
+# Run extended tests (including naughty strings - can be slow)
+RUN_EXTENDED_TESTS=1 ./run_all_tests.sh
+```
 
 ## General Testing Approach
 
