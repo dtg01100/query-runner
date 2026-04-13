@@ -273,7 +273,7 @@ save_to_cache() {
     cp "$temp_dir/QueryRunner.class" "$cache_path/"
 
     # Save metadata
-    cat > "$cache_path/metadata.json" << 'EOF'
+    cat > "$cache_path/metadata.json" << EOF
 {
     "source_hash": "$(get_source_hash)",
     "drivers_hash": "$(get_drivers_hash)",
@@ -568,7 +568,7 @@ save_precompiled_hash() {
 }
 
 usage() {
-    cat << 'EOF'
+    cat << EOF
 Usage: $(basename "$0") [OPTIONS] [QUERY_FILE]
 
 Execute read-only SQL queries using JDBC with autoconfiguration.
@@ -600,6 +600,7 @@ Options:
       --daemon-restart       Restart the daemon process
       --daemon-status        Check daemon status
       --allow-union-tables TABLES  Comma-separated list of tables allowed in UNION queries
+     -q, --query QUERY        SQL query to execute (instead of reading from file or stdin)
      -h, --help              Show this help message
     --                      End of options; next argument is interpreted as the query file (even if it starts with '-').
 
@@ -607,6 +608,7 @@ Examples:
     echo "SELECT * FROM users LIMIT 10" | $(basename "$0")
     $(basename "$0") -t mysql query.sql
     $(basename "$0") -f json --host localhost --port 5432 -t postgresql query.sql
+    $(basename "$0") -q "SELECT * FROM users LIMIT 10"
     $(basename "$0") --test-connection
 
 Environment:
@@ -1792,13 +1794,13 @@ EOF
             echo "Compilation error details:" >&2
             echo "$javac_output" >&2
             exit 1
-        fi
-        # Save to cache for future use
-        save_to_cache "$cache_key" "$compilation_dir"
-        debug "Compiled and saved class to cache at $compilation_dir"
-        fi
     fi
-    local classpath
+    # Save to cache for future use
+    save_to_cache "$cache_key" "$compilation_dir"
+    debug "Compiled and saved class to cache at $compilation_dir"
+fi
+fi
+local classpath
     classpath=$(build_classpath "$JAR_FILE")
     export OUTPUT_FORMAT="$format" JDBC_URL JDBC_DRIVER_CLASS DB_USER DB_PASSWORD
     # Pass DEBUG to Java process as QUERY_RUNNER_DEBUG env var so the Java runner can also print debug info
@@ -1935,6 +1937,7 @@ ALLOW_UNION_TABLES=""
 DOWNLOAD_DRIVER=""
 DAEMON_ACTION=""
 QUERY_FILE=""
+CLI_QUERY=""
 
 # Enhanced command line parsing with validation
 while [[ $# -gt 0 ]]; do
@@ -2045,6 +2048,14 @@ while [[ $# -gt 0 ]]; do
             ALLOW_UNION_TABLES=$(validate_cli_option "allow-union-tables" "$2")
             shift 2
             ;;
+        -q|--query)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --query requires a value" >&2
+                usage
+            fi
+            CLI_QUERY="$2"
+            shift 2
+            ;;
         --debug)
             CLI_DEBUG=1
             DEBUG=1
@@ -2124,6 +2135,7 @@ get_daemon_endpoint() {
     if [[ -S "$DAEMON_SOCKET" ]]; then
         echo "UNIX:$DAEMON_SOCKET"
     elif [[ -f "$DAEMON_PORT_FILE" ]]; then
+        local port
         port=$(cat "$DAEMON_PORT_FILE" 2>/dev/null || echo "")
         if [[ -n "$port" ]]; then
             echo "INET:localhost:$port"
@@ -3051,8 +3063,10 @@ fi
 # Load environment
 load_env
 
-# Get query
-if [[ -n "$QUERY_FILE" ]]; then
+# Get query - priority: CLI_QUERY > QUERY_FILE > stdin
+if [[ -n "$CLI_QUERY" ]]; then
+    query="$CLI_QUERY"
+elif [[ -n "$QUERY_FILE" ]]; then
     # Normalize/harden path
     normalized_query_file=$(normalize_query_file_path "$QUERY_FILE") || {
         echo "Error: Invalid or unsafe query file path: $QUERY_FILE" >&2
