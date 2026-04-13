@@ -1982,7 +1982,17 @@ is_daemon_running() {
             return 0
         fi
     fi
+    cleanup_stale_daemon_state
     return 1
+}
+
+cleanup_stale_daemon_state() {
+    local pid
+    pid=$(cat "$DAEMON_PID_FILE" 2>/dev/null || echo "")
+    if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
+        debug "Cleaning up stale daemon state (dead PID: $pid)"
+        rm -f "$DAEMON_PID_FILE" "$DAEMON_PORT_FILE" "$DAEMON_SOCKET" 2>/dev/null || true
+    fi
 }
 
 get_daemon_endpoint() {
@@ -2792,7 +2802,18 @@ DAEMON_EOF
     local daemon_pid=$!
     echo "$daemon_pid" > "$DAEMON_PID_FILE"
 
-    sleep 1
+    local max_wait=5
+    local waited=0
+    while [[ $waited -lt $max_wait ]]; do
+        if [[ -S "$DAEMON_SOCKET" ]] || [[ -f "$DAEMON_PORT_FILE" ]]; then
+            break
+        fi
+        if ! kill -0 "$daemon_pid" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
 
     if kill -0 "$daemon_pid" 2>/dev/null; then
         if [[ -S "$DAEMON_SOCKET" ]]; then

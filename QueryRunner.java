@@ -167,6 +167,14 @@ public class QueryRunner {
                 stmt.setObject(i + 1, null);
             } else if (value instanceof Boolean) {
                 stmt.setBoolean(i + 1, (Boolean) value);
+            } else if (value instanceof Long) {
+                stmt.setLong(i + 1, (Long) value);
+            } else if (value instanceof Integer) {
+                stmt.setInt(i + 1, (Integer) value);
+            } else if (value instanceof Double) {
+                stmt.setDouble(i + 1, (Double) value);
+            } else if (value instanceof Float) {
+                stmt.setFloat(i + 1, (Float) value);
             } else if (value instanceof Number) {
                 stmt.setObject(i + 1, value);
             } else {
