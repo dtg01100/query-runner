@@ -338,7 +338,7 @@ test_multiple_db_types_caching() {
         fi
     done
     
-    if [[ $wait_status -ne 0 ]]; then
+    
         log_fail "One or more concurrent cache queries failed"
         return
     fi
