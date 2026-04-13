@@ -164,6 +164,9 @@ Options:
   -d, --database DATABASE    Database name (overrides .env)
   -u, --user USER            Database user (overrides .env)
   -P, --password PASSWORD    Database password (overrides .env)
+  --param VALUE              Bind a query parameter for ? placeholders (repeatable)
+  --params JSON              JSON array of parameter values for placeholders
+  --params-file FILE         File containing a JSON array of parameter values
   -e, --env-file FILE        Custom environment file (default: .env)
   --drivers-dir DIR          Directory containing JDBC drivers (default: ./drivers)
   --allow-union-tables TABLES Comma-separated list of tables allowed in UNION queries
@@ -178,6 +181,19 @@ Options:
 
 ```bash
 ./query_runner -t postgresql --host localhost --port 5432 -d mydb -u user -P pass query.sql
+```
+
+#### Parameterized Queries
+
+```bash
+echo "SELECT id, value FROM test WHERE id = ?" | ./query_runner -t sqlite -d "$TEST_DB" --param 2
+```
+
+You can also pass parameter values as JSON via `SQL_PARAMS` or `--params`:
+
+```bash
+export SQL_PARAMS='[2]'
+echo "SELECT id, value FROM test WHERE id = ?" | ./query_runner -t sqlite -d "$TEST_DB"
 ```
 
 #### List Available Drivers

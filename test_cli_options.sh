@@ -232,6 +232,26 @@ test_user_password_options() {
     fi
 }
 
+# Test query parameter option
+test_query_parameter_option() {
+    echo "=== Testing Query Parameter Options ==="
+
+    output=$(echo "SELECT value FROM test WHERE id = ?" | "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" --param 2 2>&1 || true)
+    if echo "$output" | grep -q "data2"; then
+        log_pass "Repeatable --param parameter binding works"
+    else
+        log_fail "Repeatable --param failed" "Expected data2 in output"
+    fi
+
+    # Test SQL_PARAMS environment variable with JSON array
+    output=$(SQL_PARAMS='[1]' echo "SELECT value FROM test WHERE id = ?" | "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" 2>&1 || true)
+    if echo "$output" | grep -q "data1"; then
+        log_pass "SQL_PARAMS environment variable binding works"
+    else
+        log_fail "SQL_PARAMS environment variable failed" "Expected data1 in output"
+    fi
+}
+
 # Test env-file option
 test_env_file_option() {
     echo "=== Testing Env File Options ==="
@@ -462,6 +482,8 @@ main() {
     test_database_option
     echo
     test_user_password_options
+    echo
+    test_query_parameter_option
     echo
     test_env_file_option
     echo

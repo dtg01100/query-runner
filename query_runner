@@ -586,6 +586,9 @@ Options:
     -d, --database DATABASE Database name (overrides .env)
     -u, --user USER         Database user (overrides .env)
     -P, --password PASSWORD Database password (overrides .env)
+    --param VALUE           Bind a query parameter for ? placeholders (repeatable)
+    --params JSON           JSON array of parameter values for placeholders
+    --params-file FILE      File containing a JSON array of parameter values
 -e, --env-file FILE     Custom environment file (default: .env)
      --drivers-dir DIR       JDBC drivers directory (default: ./drivers)
      --list-drivers          List available database drivers and exit
@@ -609,9 +612,13 @@ Examples:
     $(basename "$0") -t mysql query.sql
     $(basename "$0") -f json --host localhost --port 5432 -t postgresql query.sql
     $(basename "$0") -q "SELECT * FROM users LIMIT 10"
+    $(basename "$0") -q "SELECT * FROM users WHERE id = ?" --param 1
     $(basename "$0") --test-connection
+    $(basename "$0") --daemon-start
+    $(basename "$0") --no-daemon -q "SELECT 1"
 
-Environment:
+Query Priority: -q > QUERY_FILE > stdin
+Daemon Mode: Enabled by default. Use --no-daemon to force single-query mode.
     Uses .env file for database connection settings.
     Autoconfigures based on DB_TYPE.
     Supported types: mysql, postgresql, oracle, sqlserver, db2, h2, sqlite
@@ -1479,6 +1486,26 @@ load_env() {
     if [[ "$db_type" == "h2" && -n "${DB_DATABASE:-}" ]]; then
         debug "Final H2 DB identifier: $DB_DATABASE"
     fi
+
+    if [[ -n "${CLI_PARAMS_FILE:-}" ]]; then
+        if [[ ! -f "$CLI_PARAMS_FILE" ]]; then
+            echo "Error: params file not found: $CLI_PARAMS_FILE" >&2
+            exit 1
+        fi
+        CLI_PARAMS_JSON=$(cat -- "$CLI_PARAMS_FILE")
+    fi
+
+    if [[ ${#CLI_PARAM_VALUES[@]} -gt 0 && -n "${CLI_PARAMS_JSON:-}" ]]; then
+        echo "Error: Cannot use --param with --params or --params-file at the same time" >&2
+        exit 1
+    fi
+
+    if [[ ${#CLI_PARAM_VALUES[@]} -gt 0 ]]; then
+        SQL_PARAMS=$(build_sql_params_json)
+    elif [[ -n "${CLI_PARAMS_JSON:-}" ]]; then
+        SQL_PARAMS="$CLI_PARAMS_JSON"
+    fi
+
     configure_database "$db_type"
 
     # Find the appropriate driver JAR (already validated)
@@ -1543,250 +1570,7 @@ execute_query() {
             compilation_dir="$temp_dir"
             temp_java_file="$compilation_dir/QueryRunner.java"
 
-cat > "$temp_java_file" << 'EOF'
-import java.sql.*;
-import java.util.*;
-import java.util.regex.*;
-
-public class QueryRunner {
-
-    private static boolean isDebug() {
-        String v = System.getenv("QUERY_RUNNER_DEBUG");
-        return v != null && (v.equals("1") || v.equalsIgnoreCase("true"));
-    }
-
-    private static void debug(String msg) {
-        if (isDebug()) System.err.println("DEBUG: " + msg);
-    }
-
-    private static String maskJdbcUrl(String url) {
-        if (url == null) return null;
-        // Mask password= param in JDBC URL if present
-        try {
-            return url.replaceAll("(?i)(password=)([^&;]+)", "$1******");
-        } catch (Exception e) {
-            return url;
-        }
-    }
-
-    public static void main(String[] args) {
-        String query = "";
-        Scanner scanner = new Scanner(System.in);
-        if (scanner.hasNextLine()) {
-            query = scanner.useDelimiter("\\A").next();
-        }
-        String url = System.getenv("JDBC_URL");
-        String driver = System.getenv("JDBC_DRIVER_CLASS");
-        String user = System.getenv("DB_USER");
-        String password = System.getenv("DB_PASSWORD");
-        String format = System.getenv("OUTPUT_FORMAT");
-        if (format == null) format = "text";
-        debug("JDBC driver class: " + driver);
-        debug("JDBC URL: " + maskJdbcUrl(url));
-        debug("DB user: " + (user == null ? "(none)" : user));
-        try {
-            Class.forName(driver);
-        } catch (ClassNotFoundException e) {
-            System.err.println("Error: JDBC driver not found: " + e.getMessage());
-            System.exit(1);
-        }
-
-        try (Connection conn = DriverManager.getConnection(url, user, password);
-             Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery(query)) {
-
-            ResultSetMetaData meta = rs.getMetaData();
-            int columnCount = meta.getColumnCount();
-            List<String> columnNames = new ArrayList<>();
-            for (int i = 1; i <= columnCount; i++) {
-                columnNames.add(meta.getColumnName(i));
-            }
-
-            switch (format) {
-                case "pretty":
-                    // For pretty format, load all rows to calculate widths
-                    List<Map<String, Object>> rows = new ArrayList<>();
-                    while (rs.next()) {
-                        Map<String, Object> row = new HashMap<>();
-                        for (int i = 1; i <= columnCount; i++) {
-                            row.put(columnNames.get(i-1), rs.getObject(i));
-                        }
-                        rows.add(row);
-                    }
-                    outputPretty(columnNames, rows);
-                    break;
-                case "json":
-                    outputJsonStream(columnNames, rs);
-                    break;
-                case "csv":
-                    outputCsvStream(columnNames, rs);
-                    break;
-                case "text":
-                default:
-                    outputTextStream(columnNames, rs);
-                    break;
-            }
-        } catch (SQLException e) {
-            System.err.println("SQL Error: " + e.getMessage());
-            System.err.println("SQL State: " + e.getSQLState());
-            System.err.println("Error Code: " + e.getErrorCode());
-            if (isDebug()) {
-                e.printStackTrace(System.err);
-            }
-            System.exit(1);
-        }
-    }
-
-    private static String escapeJson(String str) {
-        if (str == null) {
-            return null;
-        }
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < str.length(); i++) {
-            char c = str.charAt(i);
-            switch (c) {
-                case '\\':
-                case '"':
-                    sb.append('\\').append(c);
-                    break;
-                case '\b':
-                    sb.append("\\b");
-                    break;
-                case '\t':
-                    sb.append("\\t");
-                    break;
-                case '\n':
-                    sb.append("\\n");
-                    break;
-                case '\f':
-                    sb.append("\\f");
-                    break;
-                case '\r':
-                    sb.append("\\r");
-                    break;
-                default:
-                    if (c < ' ') {
-                        String t = "000" + Integer.toHexString(c);
-                        sb.append("\\u").append(t.substring(t.length() - 4));
-                    } else {
-                        sb.append(c);
-                    }
-            }
-        }
-        return sb.toString();
-    }
-
-    private static String repeatString(String str, int count) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < count; i++) {
-            sb.append(str);
-        }
-        return sb.toString();
-    }
-
-    private static void outputJsonStream(List<String> columnNames, ResultSet rs) throws SQLException {
-        System.out.print("[");
-        boolean first = true;
-        while (rs.next()) {
-            if (!first) System.out.print(",");
-            first = false;
-            System.out.print("{");
-            for (int i = 0; i < columnNames.size(); i++) {
-                if (i > 0) System.out.print(",");
-                System.out.print("\"" + escapeJson(columnNames.get(i)) + "\":");
-                Object value = rs.getObject(i + 1);
-                if (value == null) {
-                    System.out.print("null");
-                } else if (value instanceof Number || value instanceof Boolean) {
-                    System.out.print(value.toString());
-                } else {
-                    System.out.print("\"" + escapeJson(value.toString()) + "\"");
-                }
-            }
-            System.out.print("}");
-        }
-        System.out.println("]");
-    }
-
-    private static void outputCsvStream(List<String> columnNames, ResultSet rs) throws SQLException {
-        // Output header
-        for (int i = 0; i < columnNames.size(); i++) {
-            if (i > 0) System.out.print(",");
-            System.out.print("\"" + columnNames.get(i).replace("\"", "\"\"") + "\"");
-        }
-        System.out.println();
-        // Stream rows
-        while (rs.next()) {
-            for (int i = 0; i < columnNames.size(); i++) {
-                if (i > 0) System.out.print(",");
-                Object value = rs.getObject(i + 1);
-                if (value == null) {
-                    System.out.print("");
-                } else {
-                    String strValue = value.toString();
-                    System.out.print("\"" + strValue.replace("\"", "\"\"") + "\"");
-                }
-            }
-            System.out.println();
-        }
-    }
-
-
-
-    private static void outputTextStream(List<String> columnNames, ResultSet rs) throws SQLException {
-        // Output header
-        for (int i = 0; i < columnNames.size(); i++) {
-            if (i > 0) System.out.print("\t");
-            System.out.print(columnNames.get(i));
-        }
-        System.out.println();
-        // Stream rows
-        while (rs.next()) {
-            for (int i = 0; i < columnNames.size(); i++) {
-                if (i > 0) System.out.print("\t");
-                Object value = rs.getObject(i + 1);
-                System.out.print(value != null ? value.toString() : "NULL");
-            }
-            System.out.println();
-        }
-    }
-
-    private static void outputPretty(List<String> columnNames, List<Map<String, Object>> rows) {
-        int[] maxWidths = new int[columnNames.size()];
-        for (int i = 0; i < columnNames.size(); i++) {
-            maxWidths[i] = columnNames.get(i).length();
-        }
-        for (Map<String, Object> row : rows) {
-            for (int i = 0; i < columnNames.size(); i++) {
-                Object value = row.get(columnNames.get(i));
-                String strValue = value != null ? value.toString() : "NULL";
-                maxWidths[i] = Math.max(maxWidths[i], strValue.length());
-            }
-        }
-        String separator = "+";
-        for (int width : maxWidths) {
-            separator += repeatString("-", width + 2) + "+";
-        }
-        System.out.println(separator);
-        System.out.print("|");
-        for (int i = 0; i < columnNames.size(); i++) {
-            System.out.print(" " + String.format("%-" + maxWidths[i] + "s", columnNames.get(i)) + " |");
-        }
-        System.out.println();
-        System.out.println(separator);
-        for (Map<String, Object> row : rows) {
-            System.out.print("|");
-            for (int i = 0; i < columnNames.size(); i++) {
-                Object value = row.get(columnNames.get(i));
-                String strValue = value != null ? value.toString() : "NULL";
-                System.out.print(" " + String.format("%-" + maxWidths[i] + "s", strValue) + " |");
-            }
-            System.out.println();
-        }
-        System.out.println(separator);
-    }
-}
-EOF
+    cp "$SCRIPT_DIR/QueryRunner.java" "$temp_java_file"
 
     debug "Compiling temporary Java file: $temp_java_file"
     if ! javac_output=$("$JAVAC_BIN" "$temp_java_file" 2>&1); then
@@ -1802,7 +1586,7 @@ fi
 fi
 local classpath
     classpath=$(build_classpath "$JAR_FILE")
-    export OUTPUT_FORMAT="$format" JDBC_URL JDBC_DRIVER_CLASS DB_USER DB_PASSWORD
+    export OUTPUT_FORMAT="$format" JDBC_URL JDBC_DRIVER_CLASS DB_USER DB_PASSWORD SQL_PARAMS
     # Pass DEBUG to Java process as QUERY_RUNNER_DEBUG env var so the Java runner can also print debug info
     export QUERY_RUNNER_DEBUG="${DEBUG:-${QUERY_RUNNER_DEBUG:-0}}"
     echo -n "$query" | "$JAVA_BIN" --enable-native-access=ALL-UNNAMED -cp "$classpath:$compilation_dir" QueryRunner
@@ -1918,10 +1702,53 @@ validate_cli_option() {
                 exit 1
             fi
             ;;
+        "param")
+            if [[ $value_length -gt 4096 ]]; then
+                echo "Error: Parameter value too long (maximum 4096 characters)" >&2
+                exit 1
+            fi
+            ;;
+        "params")
+            if [[ $value_length -gt 8192 ]]; then
+                echo "Error: JSON parameter list too long" >&2
+                exit 1
+            fi
+            ;;
+        "params-file")
+            if ! normalize_fs_path "$value" >/dev/null 2>&1; then
+                echo "Error: Invalid path for params-file: $value" >&2
+                echo "Please provide a valid file system path." >&2
+                exit 1
+            fi
+            ;;
     esac
     
     # Return the validated value
     printf '%s' "$value"
+}
+
+escape_json_string() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\b'/\\b}"
+    s="${s//$'\f'/\\f}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
+build_sql_params_json() {
+    local params=()
+    local escaped
+    for param in "${CLI_PARAM_VALUES[@]}"; do
+        escaped=$(escape_json_string "$param")
+        params+=("\"$escaped\"")
+    done
+    local joined
+    joined=$(IFS=, ; echo "${params[*]}")
+    printf '[%s]' "$joined"
 }
 
 # Initialize CLI variables
@@ -1933,6 +1760,9 @@ CLI_PASSWORD=""
 CLI_TYPE=""
 CLI_FORMAT="text"
 CLI_ENV_FILE=""
+CLI_PARAM_VALUES=()
+CLI_PARAMS_JSON=""
+CLI_PARAMS_FILE=""
 ALLOW_UNION_TABLES=""
 DOWNLOAD_DRIVER=""
 DAEMON_ACTION=""
@@ -2056,6 +1886,30 @@ while [[ $# -gt 0 ]]; do
             CLI_QUERY="$2"
             shift 2
             ;;
+        --param)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --param requires a value" >&2
+                usage
+            fi
+            CLI_PARAM_VALUES+=("$(validate_cli_option "param" "$2")")
+            shift 2
+            ;;
+        --params)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --params requires a value" >&2
+                usage
+            fi
+            CLI_PARAMS_JSON="$2"
+            shift 2
+            ;;
+        --params-file)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --params-file requires a value" >&2
+                usage
+            fi
+            CLI_PARAMS_FILE="$(validate_cli_option "params-file" "$2")"
+            shift 2
+            ;;
         --debug)
             CLI_DEBUG=1
             DEBUG=1
@@ -2158,6 +2012,7 @@ start_daemon() {
     debug "Starting daemon..."
 
     mkdir -p "$HOME/.query_runner"
+    chmod 700 "$HOME/.query_runner" 2>/dev/null || true
 
     local classpath
     classpath=$(build_classpath "$JAR_FILE")
@@ -2356,49 +2211,93 @@ public class QueryDaemon {
                 pool = new ConnectionPool(config);
             }
 
-            try (Connection conn = pool.getConnection();
-                 Statement stmt = conn.createStatement();
-                 ResultSet rs = stmt.executeQuery(sql)) {
-
-                ResultSetMetaData meta = rs.getMetaData();
-                int columnCount = meta.getColumnCount();
-                List<String> columnNames = new ArrayList<>();
-                for (int i = 1; i <= columnCount; i++) {
-                    columnNames.add(meta.getColumnName(i));
+            try (Connection conn = pool.getConnection()) {
+                Object paramsObj = request.get("params");
+                List<Object> params = null;
+                if (paramsObj instanceof List) {
+                    @SuppressWarnings("unchecked")
+                    List<Object> castParams = (List<Object>) paramsObj;
+                    params = castParams;
                 }
 
-                StringBuilder result = new StringBuilder();
-                result.append("{\"status\":\"ok\",");
-                result.append("\"format\":\"").append(escapeJson(format)).append("\",");
-                result.append("\"columns\":[");
-                for (int i = 0; i < columnNames.size(); i++) {
-                    if (i > 0) result.append(",");
-                    result.append("\"").append(escapeJson(columnNames.get(i))).append("\"");
+                if (params != null && !params.isEmpty()) {
+                    try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                        bindParameters(stmt, params);
+                        try (ResultSet rs = stmt.executeQuery()) {
+                            return buildQueryResponse(rs, format);
+                        }
+                    }
+                } else {
+                    try (Statement stmt = conn.createStatement();
+                         ResultSet rs = stmt.executeQuery(sql)) {
+                        return buildQueryResponse(rs, format);
+                    }
                 }
-                result.append("],");
-                result.append("\"data\":");
-
-                switch (format) {
-                    case "json":
-                        result.append(formatJson(rs, columnNames, columnCount));
-                        break;
-                    case "csv":
-                        result.append(formatCsv(rs, columnNames, columnCount));
-                        break;
-                    case "pretty":
-                        result.append(formatPretty(rs, columnNames, columnCount));
-                        break;
-                    default:
-                        result.append(formatText(rs, columnNames, columnCount));
-                }
-
-                result.append("}");
-                return result.toString();
             }
         } catch (SQLException e) {
             return errorResponse("SQL Error: " + sanitizeError(e.getMessage()));
         } catch (Exception e) {
             return errorResponse("Error: " + e.getMessage());
+        }
+    }
+
+    private String buildQueryResponse(ResultSet rs, String format) throws SQLException {
+        ResultSetMetaData meta = rs.getMetaData();
+        int columnCount = meta.getColumnCount();
+        List<String> columnNames = new ArrayList<>();
+        for (int i = 1; i <= columnCount; i++) {
+            columnNames.add(meta.getColumnName(i));
+        }
+
+        StringBuilder result = new StringBuilder();
+        result.append("{\"status\":\"ok\",");
+        result.append("\"format\":\"").append(escapeJson(format)).append("\",");
+        result.append("\"columns\":[");
+        for (int i = 0; i < columnNames.size(); i++) {
+            if (i > 0) result.append(",");
+            result.append("\"").append(escapeJson(columnNames.get(i))).append("\"");
+        }
+        result.append("],");
+        result.append("\"data\":");
+
+        switch (format) {
+            case "json":
+                result.append(formatJson(rs, columnNames, columnCount));
+                break;
+            case "csv":
+                result.append(formatCsv(rs, columnNames, columnCount));
+                break;
+            case "pretty":
+                result.append(formatPretty(rs, columnNames, columnCount));
+                break;
+            default:
+                result.append(formatText(rs, columnNames, columnCount));
+        }
+
+        result.append("}");
+        return result.toString();
+    }
+
+    private void bindParameters(PreparedStatement stmt, List<Object> params) throws SQLException {
+        for (int i = 0; i < params.size(); i++) {
+            Object value = params.get(i);
+            if (value == null) {
+                stmt.setObject(i + 1, null);
+            } else if (value instanceof Boolean) {
+                stmt.setBoolean(i + 1, (Boolean) value);
+            } else if (value instanceof Long) {
+                stmt.setLong(i + 1, (Long) value);
+            } else if (value instanceof Integer) {
+                stmt.setInt(i + 1, (Integer) value);
+            } else if (value instanceof Double) {
+                stmt.setDouble(i + 1, (Double) value);
+            } else if (value instanceof Float) {
+                stmt.setFloat(i + 1, (Float) value);
+            } else if (value instanceof Number) {
+                stmt.setObject(i + 1, value);
+            } else {
+                stmt.setString(i + 1, value.toString());
+            }
         }
     }
 
@@ -2656,6 +2555,12 @@ public class QueryDaemon {
         if (value.startsWith("\"")) {
             return unquote(value);
         }
+        if (value.startsWith("{")) {
+            return parseJson(value);
+        }
+        if (value.startsWith("[")) {
+            return parseArray(value);
+        }
         if (value.equals("true")) return Boolean.TRUE;
         if (value.equals("false")) return Boolean.FALSE;
         if (value.equals("null")) return null;
@@ -2667,6 +2572,46 @@ public class QueryDaemon {
         } catch (NumberFormatException e) {
             return value;
         }
+    }
+
+    private List<Object> parseArray(String json) {
+        List<Object> result = new ArrayList<>();
+        String trimmed = json.trim();
+        if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
+            throw new IllegalArgumentException("Invalid JSON array");
+        }
+        String content = trimmed.substring(1, trimmed.length() - 1);
+        int depth = 0;
+        int start = 0;
+        boolean inString = false;
+        boolean escaped = false;
+
+        for (int i = 0; i <= content.length(); i++) {
+            char c = i < content.length() ? content.charAt(i) : ',';
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (c == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (c == '"') {
+                inString = !inString;
+                continue;
+            }
+            if (inString) continue;
+
+            if (c == '{' || c == '[') depth++;
+            if (c == '}' || c == ']') depth--;
+            if (depth == 0 && (c == ',' || i == content.length())) {
+                String item = content.substring(start, i).trim();
+                start = i + 1;
+                if (item.isEmpty()) continue;
+                result.add(parseValue(item));
+            }
+        }
+        return result;
     }
 
     private String unquote(String s) {
@@ -2852,6 +2797,7 @@ DAEMON_EOF
     if kill -0 "$daemon_pid" 2>/dev/null; then
         if [[ -S "$DAEMON_SOCKET" ]]; then
             rm -f "$DAEMON_PORT_FILE" 2>/dev/null || true
+            chmod 600 "$DAEMON_SOCKET" 2>/dev/null || true
             debug "Daemon started with PID: $daemon_pid (Unix socket)"
         else
             local port
@@ -2946,7 +2892,11 @@ execute_query_daemon() {
         start_daemon || return 1
     fi
 
-    local request="{\"type\":\"query\",\"sql\":$(printf '%s' "$query" | jq -Rs .),\"format\":\"$format\"}"
+    local params_section=""
+    if [[ -n "${SQL_PARAMS:-}" ]]; then
+        params_section=",\"params\":$(printf '%s' "$SQL_PARAMS" | jq -c .)"
+    fi
+    local request="{\"type\":\"query\",\"sql\":$(printf '%s' "$query" | jq -Rs .),\"format\":\"$format\"${params_section}}"
     local response
 
     if [[ -S "$DAEMON_SOCKET" ]]; then
