@@ -14,6 +14,9 @@ JAVAC_BIN=""
 # Default debug flag from environment variable - CLI can override
 QUERY_RUNNER_DEBUG="${QUERY_RUNNER_DEBUG:-0}"
 
+# Version
+QUERY_RUNNER_VERSION="1.0"
+
 # Cache management functions
 init_cache() {
     [[ -d "$CACHE_DIR" ]] || mkdir -p "$CACHE_DIR"
@@ -403,7 +406,7 @@ download_standalone_jdk() {
     local java_dir="$CACHE_DIR/jdk"
 
     if [[ ! -d "$java_dir" ]]; then
-        echo "Java is not found on your system." >&2
+        echo "Error: Java is not found on your system." >&2
         read -p "Do you want to download a standalone JDK? (y/n) " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -431,10 +434,13 @@ download_standalone_jdk() {
 }
 
 get_classpath_cache_key() {
-    # Generate cache key based on drivers directory contents and timestamps
+    # Generate cache key based on drivers directory: file count, paths, and timestamps
     local drivers_info=""
     if [[ -d "$DRIVERS_DIR" ]]; then
+        local jar_count
+        jar_count=$(find "$DRIVERS_DIR" -name "*.jar" -type f 2>/dev/null | wc -l)
         drivers_info=$(find "$DRIVERS_DIR" -name "*.jar" -type f -printf "%p|%T@\n" 2>/dev/null | sort | md5sum | cut -d' ' -f1)
+        drivers_info="${jar_count}_${drivers_info}"
     fi
     echo "classpath_${drivers_info}"
 }
@@ -604,6 +610,7 @@ Options:
       --daemon-status        Check daemon status
       --allow-union-tables TABLES  Comma-separated list of tables allowed in UNION queries
      -q, --query QUERY        SQL query to execute (instead of reading from file or stdin)
+     --version              Show version information
      -h, --help              Show this help message
     --                      End of options; next argument is interpreted as the query file (even if it starts with '-').
 
@@ -689,7 +696,8 @@ check_union_safety() {
 
         # Check for UNION between multiple different tables (risky)
         if [[ ${#tables_in_query[@]} -gt 1 ]]; then
-            local unique_tables=($(printf '%s\n' "${tables_in_query[@]}" | sort -u))
+            local unique_tables
+            mapfile -t unique_tables < <(printf '%s\n' "${tables_in_query[@]}" | sort -u)
             if [[ ${#unique_tables[@]} -gt 1 ]]; then
                 debug "Multiple different tables detected in UNION: ${unique_tables[*]}"
                 
@@ -739,7 +747,8 @@ check_union_safety() {
             debug "Complex subquery with UNION detected, performing additional validation"
             
             # Count the number of UNION occurrences
-            local union_count=$(echo "$normalized_query" | grep -o "union" | wc -l)
+            local union_count
+            union_count=$(echo "$normalized_query" | grep -o "union" | wc -l)
             if [[ $union_count -gt 1 ]]; then
                 echo "Error: Multiple UNION operations detected - this is not allowed for security reasons." >&2
                 exit 1
@@ -1253,8 +1262,8 @@ find_driver_jar() {
     fi
 
     if [[ ${#jar_files[@]} -eq 0 ]]; then
-echo "Error: No JDBC driver found matching pattern: $driver_pattern" >&2
-echo "Please place the appropriate JDBC driver JAR in $DRIVERS_DIR or $SCRIPT_DIR" >&2
+        echo "Error: No JDBC driver found matching pattern: $driver_pattern" >&2
+        echo "Please place the appropriate JDBC driver JAR in $DRIVERS_DIR or $SCRIPT_DIR" >&2
         exit 1
     fi
 
@@ -1286,15 +1295,15 @@ list_drivers() {
     fi
 
     if [[ ${#found_drivers[@]} -eq 0 ]]; then
-echo "No JDBC drivers found in $DRIVERS_DIR"
-echo "Download drivers and place them in the drivers directory:"
-echo "- MySQL: https://dev.mysql.com/downloads/connector/j/"
-echo "- PostgreSQL: https://jdbc.postgresql.org/download/"
-echo "- Oracle: https://www.oracle.com/database/technologies/appdev/jdbc-downloads.html"
-echo "- SQL Server: https://docs.microsoft.com/en-us/sql/connect/jdbc/download-microsoft-jdbc-driver-for-sql-server"
-echo "- DB2: https://www.ibm.com/support/pages/node/6331129"
-echo "- H2: https://www.h2database.com/html/download.html"
-echo "- SQLite: https://github.com/xerial/sqlite-jdbc/releases"
+        echo "No JDBC drivers found in $DRIVERS_DIR"
+        echo "Download drivers and place them in the drivers directory:"
+        echo "- MySQL: https://dev.mysql.com/downloads/connector/j/"
+        echo "- PostgreSQL: https://jdbc.postgresql.org/download/"
+        echo "- Oracle: https://www.oracle.com/database/technologies/appdev/jdbc-downloads.html"
+        echo "- SQL Server: https://docs.microsoft.com/en-us/sql/connect/jdbc/download-microsoft-jdbc-driver-for-sql-server"
+        echo "- DB2: https://www.ibm.com/support/pages/node/6331129"
+        echo "- H2: https://www.h2database.com/html/download.html"
+        echo "- SQLite: https://github.com/xerial/sqlite-jdbc/releases"
     else
         printf '%s\n' "${found_drivers[@]}"
     fi
@@ -1942,6 +1951,10 @@ while [[ $# -gt 0 ]]; do
         --help)
             usage
             ;;
+        --version)
+            echo "query_runner version $QUERY_RUNNER_VERSION"
+            exit 0
+            ;;
         -*)
             echo "Unknown option: $1" >&2
             usage
@@ -2261,11 +2274,11 @@ public class QueryDaemon {
 
         StringBuilder result = new StringBuilder();
         result.append("{\"status\":\"ok\",");
-        result.append("\"format\":\"").append(escapeJson(format)).append("\",");
+        result.append("\"format\":\"").append(JsonUtil.escapeJsonEmpty(format)).append("\",");
         result.append("\"columns\":[");
         for (int i = 0; i < columnNames.size(); i++) {
             if (i > 0) result.append(",");
-            result.append("\"").append(escapeJson(columnNames.get(i))).append("\"");
+            result.append("\"").append(JsonUtil.escapeJsonEmpty(columnNames.get(i))).append("\"");
         }
         result.append("],");
         result.append("\"data\":");
@@ -2325,7 +2338,7 @@ public class QueryDaemon {
                 if (value == null) {
                     sb.append("null");
                 } else {
-                    sb.append("\"").append(escapeJson(value.toString())).append("\"");
+                    sb.append("\"").append(JsonUtil.escapeJsonEmpty(value.toString())).append("\"");
                 }
             }
             sb.append("]");
@@ -2344,14 +2357,14 @@ public class QueryDaemon {
             sb.append("{");
             for (int i = 0; i < columnCount; i++) {
                 if (i > 0) sb.append(",");
-                sb.append("\"").append(escapeJson(columnNames.get(i))).append("\":");
+                sb.append("\"").append(JsonUtil.escapeJsonEmpty(columnNames.get(i))).append("\":");
                 Object value = rs.getObject(i + 1);
                 if (value == null) {
                     sb.append("null");
                 } else if (value instanceof Number || value instanceof Boolean) {
                     sb.append(value.toString());
                 } else {
-                    sb.append("\"").append(escapeJson(value.toString())).append("\"");
+                    sb.append("\"").append(JsonUtil.escapeJsonEmpty(value.toString())).append("\"");
                 }
             }
             sb.append("}");
@@ -2365,7 +2378,7 @@ public class QueryDaemon {
         sb.append("[[");
         for (int i = 0; i < columnCount; i++) {
             if (i > 0) sb.append(",");
-            sb.append("\"").append(escapeJson(columnNames.get(i))).append("\"");
+            sb.append("\"").append(JsonUtil.escapeJsonEmpty(columnNames.get(i))).append("\"");
         }
         sb.append("],");
         boolean firstRow = true;
@@ -2379,7 +2392,7 @@ public class QueryDaemon {
                 if (value == null) {
                     sb.append("null");
                 } else {
-                    sb.append("\"").append(escapeJson(value.toString().replace("\"", "\"\""))).append("\"");
+                    sb.append("\"").append(JsonUtil.escapeJsonEmpty(value.toString().replace("\"", "\"\""))).append("\"");
                 }
             }
             sb.append("]");
@@ -2409,12 +2422,12 @@ public class QueryDaemon {
             for (Map.Entry<String, Object> entry : row.entrySet()) {
                 if (!first) sb.append(",");
                 first = false;
-                sb.append("\"").append(escapeJson(entry.getKey())).append("\":");
+                sb.append("\"").append(JsonUtil.escapeJsonEmpty(entry.getKey())).append("\":");
                 Object value = entry.getValue();
                 if (value == null) {
                     sb.append("null");
                 } else {
-                    sb.append("\"").append(escapeJson(value.toString())).append("\"");
+                    sb.append("\"").append(JsonUtil.escapeJsonEmpty(value.toString())).append("\"");
                 }
             }
             sb.append("}");
@@ -2631,30 +2644,6 @@ public class QueryDaemon {
         return s;
     }
 
-    private String escapeJson(String str) {
-        if (str == null) return "";
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < str.length(); i++) {
-            char c = str.charAt(i);
-            switch (c) {
-                case '"': sb.append("\\\""); break;
-                case '\\': sb.append("\\\\"); break;
-                case '\n': sb.append("\\n"); break;
-                case '\r': sb.append("\\r"); break;
-                case '\t': sb.append("\\t"); break;
-                case '\b': sb.append("\\b"); break;
-                case '\f': sb.append("\\f"); break;
-                default:
-                    if (c < ' ' || c > 127) {
-                        sb.append(String.format("\\u%04x", (int) c));
-                    } else {
-                        sb.append(c);
-                    }
-            }
-        }
-        return sb.toString();
-    }
-
     private String sanitizeError(String msg) {
         if (msg == null) return "Unknown error";
         return msg.replaceAll("(?i)(password|passwd|pwd)\\s*[:=]\\s*[^\\s,;]+", "$1=******")
@@ -2664,11 +2653,11 @@ public class QueryDaemon {
 
     private String jsonResponse(String status, String key, Object value) {
         return String.format("{\"status\":\"%s\",\"%s\":%s}", status, key,
-            value instanceof String ? "\"" + escapeJson((String) value) + "\"" : value);
+            value instanceof String ? "\"" + JsonUtil.escapeJsonEmpty((String) value) + "\"" : value);
     }
 
     private String errorResponse(String message) {
-        return String.format("{\"status\":\"error\",\"message\":\"%s\"}", escapeJson(message));
+        return String.format("{\"status\":\"error\",\"message\":\"%s\"}", JsonUtil.escapeJsonEmpty(message));
     }
 
     static class ConnectionPool {
@@ -2917,7 +2906,8 @@ execute_query_daemon() {
     if [[ -n "${SQL_PARAMS:-}" ]]; then
         params_section=",\"params\":$(printf '%s' "$SQL_PARAMS" | jq -c .)"
     fi
-    local request="{\"type\":\"query\",\"sql\":$(printf '%s' "$query" | jq -Rs .),\"format\":\"$format\"${params_section}}"
+    local request
+    request="{\"type\":\"query\",\"sql\":$(printf '%s' "$query" | jq -Rs .),\"format\":\"$format\"${params_section}}"
     local response
 
     if [[ -S "$DAEMON_SOCKET" ]]; then

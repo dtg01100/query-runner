@@ -53,6 +53,7 @@ Categories:
     security         Security-related tests (input validation, naughty strings)
     formats          Output format and CLI tests
     daemon           Daemon mode tests
+    lint             Run shellcheck linting
     integration      All tests in sequence
 
 Individual suites:
@@ -177,6 +178,30 @@ main() {
                 echo ""
                 echo -e "${BLUE}=== Daemon Mode Tests ===${NC}"
                 run_test_suite "$SCRIPT_DIR/test_daemon/test_daemon.sh" "Daemon Mode (All)"
+            fi
+            ;;
+        lint)
+            echo -e "${BLUE}=== Linting with shellcheck ===${NC}"
+            if ! command -v shellcheck >/dev/null 2>&1; then
+                echo -e "${YELLOW}⊘${NC} shellcheck not found. Install with: brew install shellcheck (macOS) or apt install shellcheck (Ubuntu/Debian)"
+                exit 0
+            fi
+            TOTAL_SUITES=$((TOTAL_SUITES + 1))
+            echo "Linting main script..."
+            if shellcheck "$SCRIPT_DIR/query_runner"; then
+                echo -e "${GREEN}✓${NC} shellcheck passed for query_runner"
+                PASSED_SUITES=$((PASSED_SUITES + 1))
+            else
+                echo -e "${RED}✗${NC} shellcheck found issues in query_runner"
+                FAILED_SUITES=$((FAILED_SUITES + 1))
+            fi
+            echo "Linting test runner..."
+            if shellcheck "$SCRIPT_DIR/run_all_tests.sh"; then
+                echo -e "${GREEN}✓${NC} shellcheck passed for run_all_tests.sh"
+                PASSED_SUITES=$((PASSED_SUITES + 1))
+            else
+                echo -e "${RED}✗${NC} shellcheck found issues in run_all_tests.sh"
+                FAILED_SUITES=$((FAILED_SUITES + 1))
             fi
             ;;
         *)
