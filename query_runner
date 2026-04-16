@@ -14,6 +14,9 @@ JAVAC_BIN=""
 # Default debug flag from environment variable - CLI can override
 QUERY_RUNNER_DEBUG="${QUERY_RUNNER_DEBUG:-0}"
 
+# Ensure DAEMON_MODE has a default early to avoid unbound variable errors
+DAEMON_MODE="${DAEMON_MODE:-auto}"
+
 # Version
 QUERY_RUNNER_VERSION="1.0"
 
@@ -1580,6 +1583,10 @@ execute_query() {
             temp_java_file="$compilation_dir/QueryRunner.java"
 
     cp "$SCRIPT_DIR/QueryRunner.java" "$temp_java_file"
+    # Also copy JsonUtil.java if present so javac compiles dependencies into the same dir
+    if [[ -f "$SCRIPT_DIR/JsonUtil.java" ]]; then
+        cp "$SCRIPT_DIR/JsonUtil.java" "$compilation_dir/JsonUtil.java"
+    fi
 
     debug "Compiling temporary Java file: $temp_java_file"
     if ! javac_output=$("$JAVAC_BIN" "$temp_java_file" 2>&1); then
