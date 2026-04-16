@@ -1588,8 +1588,9 @@ execute_query() {
         cp "$SCRIPT_DIR/JsonUtil.java" "$compilation_dir/JsonUtil.java"
     fi
 
-    debug "Compiling temporary Java file: $temp_java_file"
-    if ! javac_output=$("$JAVAC_BIN" "$temp_java_file" 2>&1); then
+    debug "Compiling temporary Java files in: $compilation_dir"
+    # Compile all Java sources in the compilation directory so dependencies like JsonUtil are included
+    if ! javac_output=$("$JAVAC_BIN" -d "$compilation_dir" "$compilation_dir"/*.java 2>&1); then
             echo "Error: Failed to compile Java code" >&2
             echo "Compilation error details:" >&2
             echo "$javac_output" >&2
