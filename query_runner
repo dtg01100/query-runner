@@ -250,41 +250,45 @@ normalize_fs_path() {
 }
 
 is_cache_valid() {
-    local cache_key="$1"
-    local cache_path
-    cache_path=$(get_cache_dir_for_key "$cache_key")
+	local cache_key="$1"
+	local cache_path
+	cache_path=$(get_cache_dir_for_key "$cache_key")
 
-    [[ -d "$cache_path" ]] || return 1
-    [[ -f "$cache_path/QueryRunner.class" ]] || return 1
-    [[ -f "$cache_path/metadata.json" ]] || return 1
+	[[ -d "$cache_path" ]] || return 1
+	[[ -f "$cache_path/QueryRunner.class" ]] || return 1
+	# Check for JsonUtil.class if JsonUtil.java exists in source
+	if [[ -f "$SCRIPT_DIR/JsonUtil.java" ]]; then
+		[[ -f "$cache_path/JsonUtil.class" ]] || return 1
+	fi
+	[[ -f "$cache_path/metadata.json" ]] || return 1
 
-    # Check if cache is not too old (24 hours)
-    local cache_age
-    cache_age=$(find "$cache_path" -maxdepth 1 -type f -mtime +1 | wc -l)
-    [[ $cache_age -eq 0 ]] || return 1
+	# Check if cache is not too old (24 hours)
+	local cache_age
+	cache_age=$(find "$cache_path" -maxdepth 1 -type f -mtime +1 | wc -l)
+	[[ $cache_age -eq 0 ]] || return 1
 
-    return 0
+	return 0
 }
 
 save_to_cache() {
-    local cache_key="$1"
-    local temp_dir="$2"
-    local cache_path
-    cache_path=$(get_cache_dir_for_key "$cache_key")
+	local cache_key="$1"
+	local temp_dir="$2"
+	local cache_path
+	cache_path=$(get_cache_dir_for_key "$cache_key")
 
-    # Create cache directory
-    mkdir -p "$cache_path"
+	# Create cache directory
+	mkdir -p "$cache_path"
 
-    # Copy compiled class file
-    cp "$temp_dir/QueryRunner.class" "$cache_path/"
+	# Copy all compiled class files
+	cp "$temp_dir"/*.class "$cache_path/" 2>/dev/null || true
 
-    # Save metadata
-    cat > "$cache_path/metadata.json" << EOF
+	# Save metadata
+	cat > "$cache_path/metadata.json" << EOF
 {
-    "source_hash": "$(get_source_hash)",
-    "drivers_hash": "$(get_drivers_hash)",
-    "created_at": "$(date -Iseconds)",
-    "query_runner_version": "1.0"
+	"source_hash": "$(get_source_hash)",
+	"drivers_hash": "$(get_drivers_hash)",
+	"created_at": "$(date -Iseconds)",
+	"query_runner_version": "1.0"
 }
 EOF
 }
