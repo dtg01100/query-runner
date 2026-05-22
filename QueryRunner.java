@@ -317,21 +317,23 @@ public class QueryRunner {
     }
 
     private static void outputCsvStream(List<String> columnNames, ResultSet rs) throws SQLException {
-        StringBuilder sb = new StringBuilder(8192);
-        for (int i = 0; i < columnNames.size(); i++) {
-            if (i > 0) sb.append(',');
-            String columnName = columnNames.get(i);
-            columnName = sanitizeOutput(columnName);
-            sb.append('"').append(columnName.replace("\"", "\"\"")).append('"');
+        int colCount = columnNames.size();
+        // Pre-compute header row with sanitized and escaped column names
+        StringBuilder header = new StringBuilder(colCount * 24);
+        for (int i = 0; i < colCount; i++) {
+            if (i > 0) header.append(',');
+            String columnName = sanitizeOutput(columnNames.get(i));
+            header.append('"').append(columnName.replace("\"", "\"\"")).append('"');
         }
-        sb.append('\n');
+        header.append('\n');
+        
+        StringBuilder sb = new StringBuilder(8192);
+        sb.append(header);
         while (rs.next()) {
-            for (int i = 0; i < columnNames.size(); i++) {
+            for (int i = 0; i < colCount; i++) {
                 if (i > 0) sb.append(',');
                 Object value = rs.getObject(i + 1);
-                if (value == null) {
-                    // empty - sb already has nothing
-                } else {
+                if (value != null) {
                     String strValue = value.toString();
                     strValue = sanitizeOutput(strValue);
                     sb.append('"').append(strValue.replace("\"", "\"\"")).append('"');
