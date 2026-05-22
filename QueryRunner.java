@@ -289,7 +289,7 @@ public class QueryRunner {
             keyPrefixes[i] = "\"" + JsonUtil.escapeJson(columnNames.get(i)) + "\":";
         }
         
-        StringBuilder sb = new StringBuilder(16384);
+        StringBuilder sb = new StringBuilder(8192);
         sb.append('[');
         boolean first = true;
         while (rs.next()) {
