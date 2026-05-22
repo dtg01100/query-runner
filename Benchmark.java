@@ -154,14 +154,11 @@ public class Benchmark {
         int colCount = colNames.size();
         int rows = Math.min(rowsData.size(), maxRows);
 
-        // Pre-compute JSON key prefixes and column separators
+        // Pre-compute JSON key prefixes
         String[] keyPrefixes = new String[colCount];
-        StringBuilder comma = new StringBuilder();
         for (int i = 0; i < colCount; i++) {
             keyPrefixes[i] = "\"" + escapeJson(colNames.get(i)) + "\":";
-            comma.append(',');
         }
-        String commaStr = comma.toString();
 
         StringBuilder sb = new StringBuilder(16384);
         sb.append('[');
