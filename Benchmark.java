@@ -151,7 +151,6 @@ public class Benchmark {
      * Uses StringBuilder for batched output, direct number append, pre-computed key prefixes
      */
     private static int outputJson(List<String> colNames, List<Object[]> rowsData, int maxRows) {
-        int count = 0;
         int colCount = colNames.size();
         int rows = Math.min(rowsData.size(), maxRows);
 
@@ -161,15 +160,14 @@ public class Benchmark {
             keyPrefixes[i] = "\"" + escapeJson(colNames.get(i)) + "\":";
         }
 
-        StringBuilder sb = new StringBuilder(8192);
+        // Pre-size buffer based on column count (estimated 100 bytes per column per row)
+        StringBuilder sb = new StringBuilder(Math.max(8192, colCount * 100 * 100));
         sb.append('[');
-        boolean first = true;
 
         for (int r = 0; r < rows; r++) {
-            Object[] row = rowsData.get(r);
-            if (!first) sb.append(',');
-            first = false;
+            if (r > 0) sb.append(',');
             sb.append('{');
+            Object[] row = rowsData.get(r);
             for (int i = 0; i < colCount; i++) {
                 if (i > 0) sb.append(',');
                 sb.append(keyPrefixes[i]);
@@ -185,11 +183,10 @@ public class Benchmark {
                 }
             }
             sb.append('}');
-            count++;
         }
         sb.append(']');
         System.out.print(sb.toString());
-        return count;
+        return rows;
     }
 
     /**
