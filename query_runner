@@ -254,6 +254,9 @@ is_cache_valid() {
 	local cache_path
 	cache_path=$(get_cache_dir_for_key "$cache_key")
 
+	# Create cache directory
+	mkdir -p "$cache_path"
+
 	[[ -d "$cache_path" ]] || return 1
 	[[ -f "$cache_path/QueryRunner.class" ]] || return 1
 	# Check for JsonUtil.class if JsonUtil.java exists in source
@@ -276,6 +279,9 @@ save_to_cache() {
 	local cache_path
 	cache_path=$(get_cache_dir_for_key "$cache_key")
 
+	# Create cache directory
+	mkdir -p "$cache_path"
+
     # Copy all compiled class files
     cp "$temp_dir"/*.class "$cache_path/" 2>/dev/null || true
 	# Save metadata
@@ -293,6 +299,9 @@ load_from_cache() {
     local cache_key="$1"
     local cache_path
     cache_path=$(get_cache_dir_for_key "$cache_key")
+
+	# Create cache directory
+	mkdir -p "$cache_path"
     echo "$cache_path/QueryRunner.class"
 }
 
