@@ -282,118 +282,147 @@ public class QueryRunner {
     }
 
     private static void outputJsonStream(List<String> columnNames, ResultSet rs) throws SQLException {
-        System.out.print("[");
+        // Pre-allocate StringBuilder for better performance
+        StringBuilder sb = new StringBuilder(8192);
+        sb.append('[');
         boolean first = true;
         while (rs.next()) {
-            if (!first) System.out.print(",");
+            if (!first) sb.append(',');
             first = false;
-            System.out.print("{");
+            sb.append('{');
             for (int i = 0; i < columnNames.size(); i++) {
-                if (i > 0) System.out.print(",");
-                System.out.print("\"" + JsonUtil.escapeJson(columnNames.get(i)) + "\":");
+                if (i > 0) sb.append(',');
+                sb.append('"').append(JsonUtil.escapeJson(columnNames.get(i))).append("\":");
                 Object value = rs.getObject(i + 1);
                 if (value == null) {
-                    System.out.print("null");
-                } else if (value instanceof Number || value instanceof Boolean) {
-                    String numStr = value.toString();
-                    if (NUMBER_PATTERN.matcher(numStr).matches()) {
-                        System.out.print(numStr);
-                    } else {
-                        System.out.print("\"" + JsonUtil.escapeJson(numStr) + "\"");
-                    }
+                    sb.append("null");
+                } else if (value instanceof Number) {
+                    sb.append(value);  // Direct append for numbers - avoid toString()
+                } else if (value instanceof Boolean) {
+                    sb.append(value);
                 } else {
-                    System.out.print("\"" + JsonUtil.escapeJson(value.toString()) + "\"");
+                    sb.append('"').append(JsonUtil.escapeJson(value.toString())).append('"');
                 }
             }
-            System.out.print("}");
+            sb.append('}');
         }
-        System.out.println("]");
+        sb.append(']');
+        System.out.print(sb.toString());
     }
 
     private static void outputCsvStream(List<String> columnNames, ResultSet rs) throws SQLException {
+        StringBuilder sb = new StringBuilder(8192);
         for (int i = 0; i < columnNames.size(); i++) {
-            if (i > 0) System.out.print(",");
+            if (i > 0) sb.append(',');
             String columnName = columnNames.get(i);
             columnName = sanitizeOutput(columnName);
-            System.out.print("\"" + columnName.replace("\"", "\"\"") + "\"");
+            sb.append('"').append(columnName.replace("\"", "\"\"")).append('"');
         }
-        System.out.println();
+        sb.append('\n');
         while (rs.next()) {
             for (int i = 0; i < columnNames.size(); i++) {
-                if (i > 0) System.out.print(",");
+                if (i > 0) sb.append(',');
                 Object value = rs.getObject(i + 1);
                 if (value == null) {
-                    System.out.print("");
+                    // empty - sb already has nothing
                 } else {
                     String strValue = value.toString();
                     strValue = sanitizeOutput(strValue);
-                    System.out.print("\"" + strValue.replace("\"", "\"\"") + "\"");
+                    sb.append('"').append(strValue.replace("\"", "\"\"")).append('"');
                 }
             }
-            System.out.println();
+            sb.append('\n');
         }
+        System.out.print(sb.toString());
     }
 
     private static void outputTextStream(List<String> columnNames, ResultSet rs) throws SQLException {
+        StringBuilder sb = new StringBuilder(8192);
         for (int i = 0; i < columnNames.size(); i++) {
-            if (i > 0) System.out.print("\t");
+            if (i > 0) sb.append('\t');
             String columnName = sanitizeOutput(columnNames.get(i));
-            System.out.print(columnName);
+            sb.append(columnName);
         }
-        System.out.println();
+        sb.append('\n');
         while (rs.next()) {
             for (int i = 0; i < columnNames.size(); i++) {
-                if (i > 0) System.out.print("\t");
+                if (i > 0) sb.append('\t');
                 Object value = rs.getObject(i + 1);
                 if (value == null) {
-                    System.out.print("NULL");
+                    sb.append("NULL");
                 } else {
                     String strValue = value.toString();
                     strValue = sanitizeOutput(strValue);
-                    System.out.print(strValue);
+                    sb.append(strValue);
                 }
             }
-            System.out.println();
+            sb.append('\n');
         }
+        System.out.print(sb.toString());
     }
 
     private static void outputPretty(List<String> columnNames, List<Map<String, Object>> rows) {
-        List<String> sanitizedNames = new ArrayList<>();
+        int colCount = columnNames.size();
+        List<String> sanitizedNames = new ArrayList<>(colCount);
         for (String name : columnNames) {
             sanitizedNames.add(sanitizeOutput(name));
         }
 
-        int[] maxWidths = new int[sanitizedNames.size()];
-        for (int i = 0; i < sanitizedNames.size(); i++) {
+        int[] maxWidths = new int[colCount];
+        for (int i = 0; i < colCount; i++) {
             maxWidths[i] = sanitizedNames.get(i).length();
         }
         for (Map<String, Object> row : rows) {
-            for (int i = 0; i < sanitizedNames.size(); i++) {
+            for (int i = 0; i < colCount; i++) {
                 Object value = row.get(columnNames.get(i));
                 String strValue = value != null ? sanitizeOutput(value.toString()) : "NULL";
-                maxWidths[i] = Math.max(maxWidths[i], strValue.length());
+                if (strValue.length() > maxWidths[i]) maxWidths[i] = strValue.length();
             }
         }
-        String separator = "+";
-        for (int width : maxWidths) {
-            separator += repeatString("-", width + 2) + "+";
+
+        StringBuilder sb = new StringBuilder(8192);
+        // Top border
+        sb.append('+');
+        for (int w : maxWidths) {
+            for (int i = 0; i < w + 2; i++) sb.append('-');
+            sb.append('+');
         }
-        System.out.println(separator);
-        System.out.print("|");
-        for (int i = 0; i < sanitizedNames.size(); i++) {
-            System.out.print(" " + String.format("%-" + maxWidths[i] + "s", sanitizedNames.get(i)) + " |");
+        sb.append('\n');
+
+        // Header row
+        sb.append('|');
+        for (int i = 0; i < colCount; i++) {
+            sb.append(' ').append(String.format("%-" + maxWidths[i] + "s", sanitizedNames.get(i))).append(" |");
         }
-        System.out.println();
-        System.out.println(separator);
+        sb.append('\n');
+
+        // Header border
+        sb.append('+');
+        for (int w : maxWidths) {
+            for (int i = 0; i < w + 2; i++) sb.append('-');
+            sb.append('+');
+        }
+        sb.append('\n');
+
+        // Data rows
         for (Map<String, Object> row : rows) {
-            System.out.print("|");
-            for (int i = 0; i < sanitizedNames.size(); i++) {
+            sb.append('|');
+            for (int i = 0; i < colCount; i++) {
                 Object value = row.get(columnNames.get(i));
                 String strValue = value != null ? sanitizeOutput(value.toString()) : "NULL";
-                System.out.print(" " + String.format("%-" + maxWidths[i] + "s", strValue) + " |");
+                sb.append(' ').append(String.format("%-" + maxWidths[i] + "s", strValue)).append(" |");
             }
-            System.out.println();
+            sb.append('\n');
         }
-        System.out.println(separator);
+
+        // Bottom border
+        sb.append('+');
+        for (int w : maxWidths) {
+            for (int i = 0; i < w + 2; i++) sb.append('-');
+            sb.append('+');
+        }
+        sb.append('\n');
+
+        System.out.print(sb.toString());
     }
 }
