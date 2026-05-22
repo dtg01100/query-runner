@@ -400,7 +400,7 @@ CREATE TABLE IF NOT EXISTS tricky_cols (
     "id" INTEGER,
     "Column With Spaces" TEXT,
     "Column,With,Commas" TEXT,
-    "Column\"With\"Quotes" TEXT
+    "Column""With""Quotes" TEXT
 );
 INSERT INTO tricky_cols VALUES (1, 'space', 'comma', 'quote');
 EOF
