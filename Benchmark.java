@@ -339,9 +339,10 @@ public class Benchmark {
      */
     private static String escapeJson(String str) {
         if (str == null) return "";
+        int len = str.length();
         // Fast path: no special chars (common case)
         boolean needsEscape = false;
-        for (int i = 0; i < str.length(); i++) {
+        for (int i = 0; i < len; i++) {
             char c = str.charAt(i);
             if (c == '\\' || c == '"' || c < ' ' || c > 127) {
                 needsEscape = true;
@@ -351,8 +352,8 @@ public class Benchmark {
         if (!needsEscape) return str;
 
         // Slow path: escape needed
-        StringBuilder sb = new StringBuilder(str.length() + 16);
-        for (int i = 0; i < str.length(); i++) {
+        StringBuilder sb = new StringBuilder(len + 16);
+        for (int i = 0; i < len; i++) {
             char c = str.charAt(i);
             switch (c) {
                 case '\\': sb.append("\\\\"); break;
@@ -362,7 +363,10 @@ public class Benchmark {
                 case '\t': sb.append("\\t"); break;
                 default:
                     if (c < ' ' || c > 127) {
-                        sb.append(String.format("\\u%04x", (int) c));
+                        // Inline hex encoding - avoid String.format overhead
+                        sb.append("\\u00");
+                        sb.append(Integer.toHexString(c >> 4 & 0xF));
+                        sb.append(Integer.toHexString(c & 0xF));
                     } else {
                         sb.append(c);
                     }
