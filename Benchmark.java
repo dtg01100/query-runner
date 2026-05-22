@@ -160,6 +160,12 @@ public class Benchmark {
             keyPrefixes[i] = "\"" + escapeJson(colNames.get(i)) + "\":";
         }
 
+        // Pre-compute column separators (commas between columns)
+        char[] colSeparators = new char[colCount - 1];
+        for (int i = 0; i < colCount - 1; i++) {
+            colSeparators[i] = ',';
+        }
+
         StringBuilder sb = new StringBuilder(16384);
         sb.append('[');
         boolean first = true;
