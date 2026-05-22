@@ -7,6 +7,9 @@ public class QueryRunner {
     private static final int MAX_ROWS = 10000;
     private static final int MAX_VALUE_LENGTH = 10000;
 
+    // Pre-compiled pattern for number detection (avoids regex compilation per value)
+    private static final Pattern NUMBER_PATTERN = Pattern.compile("^-?\\d+(\\.\\d+)?([eE][+-]?\\d+)?$");
+
     private static boolean isDebug() {
         String v = System.getenv("QUERY_RUNNER_DEBUG");
         return v != null && (v.equals("1") || v.equalsIgnoreCase("true"));
@@ -170,14 +173,6 @@ public class QueryRunner {
         debug("JDBC driver class: " + driver);
         debug("JDBC URL: " + maskJdbcUrl(url));
         debug("DB user: " + (user == null ? "(none)" : user));
-
-        try {
-            Class.forName(driver);
-        } catch (ClassNotFoundException e) {
-            System.err.println("Error: JDBC driver not found: " + sanitizeOutput(e.getMessage()));
-            System.exit(1);
-        }
-
         try (Connection conn = DriverManager.getConnection(url, user, password)) {
             if (params != null && !params.isEmpty()) {
                 try (PreparedStatement stmt = conn.prepareStatement(query)) {
@@ -301,7 +296,7 @@ public class QueryRunner {
                     System.out.print("null");
                 } else if (value instanceof Number || value instanceof Boolean) {
                     String numStr = value.toString();
-                    if (numStr.matches("^-?\\d+(\\.\\d+)?([eE][+-]?\\d+)?$")) {
+                    if (NUMBER_PATTERN.matcher(numStr).matches()) {
                         System.out.print(numStr);
                     } else {
                         System.out.print("\"" + JsonUtil.escapeJson(numStr) + "\"");

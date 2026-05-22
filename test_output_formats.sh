@@ -211,7 +211,7 @@ test_number_formatting() {
     
     # Negative number
     output=$(echo "SELECT number_val FROM edge_cases WHERE id = 2" | "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -f text 2>&1)
-    if echo "$output" | grep -q "-999"; then
+    if echo "$output" | grep -q -- "-999"; then
         log_pass "Negative number formatted correctly"
     else
         log_fail "Negative number failed" "Expected negative value"

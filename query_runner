@@ -276,12 +276,8 @@ save_to_cache() {
 	local cache_path
 	cache_path=$(get_cache_dir_for_key "$cache_key")
 
-	# Create cache directory
-	mkdir -p "$cache_path"
-
-	# Copy all compiled class files
-	cp "$temp_dir"/*.class "$cache_path/" 2>/dev/null || true
-
+    # Copy all compiled class files
+    cp "$temp_dir"/*.class "$cache_path/" 2>/dev/null || true
 	# Save metadata
 	cat > "$cache_path/metadata.json" << EOF
 {
