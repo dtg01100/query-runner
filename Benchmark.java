@@ -148,12 +148,18 @@ public class Benchmark {
 
     /**
      * Optimized JSON output - matches QueryRunner's optimized implementation
-     * Uses StringBuilder for batched output, direct number append
+     * Uses StringBuilder for batched output, direct number append, pre-computed key prefixes
      */
     private static int outputJson(List<String> colNames, List<Object[]> rowsData, int maxRows) {
         int count = 0;
         int colCount = colNames.size();
         int rows = Math.min(rowsData.size(), maxRows);
+
+        // Pre-compute JSON key prefixes to avoid repeated escapeJson calls
+        String[] keyPrefixes = new String[colCount];
+        for (int i = 0; i < colCount; i++) {
+            keyPrefixes[i] = "\"" + escapeJson(colNames.get(i)) + "\":";
+        }
 
         StringBuilder sb = new StringBuilder(8192);
         sb.append('[');
@@ -166,12 +172,12 @@ public class Benchmark {
             sb.append('{');
             for (int i = 0; i < colCount; i++) {
                 if (i > 0) sb.append(',');
-                sb.append('"').append(escapeJson(colNames.get(i))).append("\":");
+                sb.append(keyPrefixes[i]);
                 Object value = row[i];
                 if (value == null) {
                     sb.append("null");
                 } else if (value instanceof Number) {
-                    sb.append(value);  // Direct append for numbers
+                    sb.append(value);
                 } else if (value instanceof Boolean) {
                     sb.append(value);
                 } else {

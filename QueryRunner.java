@@ -282,7 +282,13 @@ public class QueryRunner {
     }
 
     private static void outputJsonStream(List<String> columnNames, ResultSet rs) throws SQLException {
-        // Pre-allocate StringBuilder for better performance
+        int colCount = columnNames.size();
+        // Pre-compute JSON key prefixes to avoid repeated escapeJson calls
+        String[] keyPrefixes = new String[colCount];
+        for (int i = 0; i < colCount; i++) {
+            keyPrefixes[i] = "\"" + JsonUtil.escapeJson(columnNames.get(i)) + "\":";
+        }
+        
         StringBuilder sb = new StringBuilder(8192);
         sb.append('[');
         boolean first = true;
@@ -290,14 +296,14 @@ public class QueryRunner {
             if (!first) sb.append(',');
             first = false;
             sb.append('{');
-            for (int i = 0; i < columnNames.size(); i++) {
+            for (int i = 0; i < colCount; i++) {
                 if (i > 0) sb.append(',');
-                sb.append('"').append(JsonUtil.escapeJson(columnNames.get(i))).append("\":");
+                sb.append(keyPrefixes[i]);
                 Object value = rs.getObject(i + 1);
                 if (value == null) {
                     sb.append("null");
                 } else if (value instanceof Number) {
-                    sb.append(value);  // Direct append for numbers - avoid toString()
+                    sb.append(value);
                 } else if (value instanceof Boolean) {
                     sb.append(value);
                 } else {
