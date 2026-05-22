@@ -1,40 +1,40 @@
 public class JsonUtil {
 
     public static String escapeJson(String str) {
-        if (str == null) return null;
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < str.length(); i++) {
+        if (str == null) return "";
+        int len = str.length();
+        
+        // Fast path: no special chars needed (common case for short strings)
+        boolean needsEscape = false;
+        for (int i = 0; i < len; i++) {
+            char c = str.charAt(i);
+            if (c == '\\' || c == '"' || c < ' ' || c > 127) {
+                needsEscape = true;
+                break;
+            }
+        }
+        if (!needsEscape) return str;
+
+        // Slow path: escape needed
+        StringBuilder sb = new StringBuilder(len + 16);
+        for (int i = 0; i < len; i++) {
             char c = str.charAt(i);
             switch (c) {
-                case '\\':
-                case '"':
-                    sb.append('\\').append(c);
-                    break;
-                case '\b':
-                    sb.append("\\b");
-                    break;
-                case '\t':
-                    sb.append("\\t");
-                    break;
-                case '\n':
-                    sb.append("\\n");
-                    break;
-                case '\f':
-                    sb.append("\\f");
-                    break;
-                case '\r':
-                    sb.append("\\r");
-                    break;
+                case '\\': sb.append("\\\\"); break;
+                case '"': sb.append("\\\""); break;
+                case '\b': sb.append("\\b"); break;
+                case '\t': sb.append("\\t"); break;
+                case '\n': sb.append("\\n"); break;
+                case '\f': sb.append("\\f"); break;
+                case '\r': sb.append("\\r"); break;
                 default:
-                    if (c < ' ') {
-                        String t = "000" + Integer.toHexString(c);
-                        sb.append("\\u").append(t.substring(t.length() - 4));
+                    if (c < ' ' || c > 127) {
+                        // Use hex string directly instead of String.format
+                        sb.append("\\u00");
+                        sb.append(Integer.toHexString(c >> 4 & 0xF));
+                        sb.append(Integer.toHexString(c & 0xF));
                     } else {
-                        if (c == '<' || c == '>' || c == '&' || c == '\'' || c == '"') {
-                            sb.append(String.format("\\u%04x", (int) c));
-                        } else {
-                            sb.append(c);
-                        }
+                        sb.append(c);
                     }
                     break;
             }
