@@ -160,13 +160,13 @@ public class Benchmark {
             keyPrefixes[i] = "\"" + escapeJson(colNames.get(i)) + "\":";
         }
 
-        StringBuilder sb = new StringBuilder(8192);
+        StringBuilder sb = new StringBuilder(16384);
         sb.append('[');
-        int rowCount = 0;
+        boolean first = true;
 
         for (int r = 0; r < rows; r++) {
-            if (rowCount > 0) sb.append(',');
-            rowCount++;
+            if (!first) sb.append(',');
+            first = false;
             sb.append('{');
             Object[] row = rowsData.get(r);
             for (int i = 0; i < colCount; i++) {
@@ -187,7 +187,7 @@ public class Benchmark {
         }
         sb.append(']');
         System.out.print(sb.toString());
-        return rowCount;
+        return rows;
     }
 
     /**
