@@ -345,23 +345,25 @@ public class QueryRunner {
     }
 
     private static void outputTextStream(List<String> columnNames, ResultSet rs) throws SQLException {
-        StringBuilder sb = new StringBuilder(8192);
-        for (int i = 0; i < columnNames.size(); i++) {
-            if (i > 0) sb.append('\t');
-            String columnName = sanitizeOutput(columnNames.get(i));
-            sb.append(columnName);
+        int colCount = columnNames.size();
+        // Pre-compute header row
+        StringBuilder header = new StringBuilder(colCount * 16);
+        for (int i = 0; i < colCount; i++) {
+            if (i > 0) header.append('\t');
+            header.append(sanitizeOutput(columnNames.get(i)));
         }
-        sb.append('\n');
+        header.append('\n');
+        
+        StringBuilder sb = new StringBuilder(8192);
+        sb.append(header);
         while (rs.next()) {
-            for (int i = 0; i < columnNames.size(); i++) {
+            for (int i = 0; i < colCount; i++) {
                 if (i > 0) sb.append('\t');
                 Object value = rs.getObject(i + 1);
                 if (value == null) {
                     sb.append("NULL");
                 } else {
-                    String strValue = value.toString();
-                    strValue = sanitizeOutput(strValue);
-                    sb.append(strValue);
+                    sb.append(sanitizeOutput(value.toString()));
                 }
             }
             sb.append('\n');
