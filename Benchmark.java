@@ -160,12 +160,13 @@ public class Benchmark {
             keyPrefixes[i] = "\"" + escapeJson(colNames.get(i)) + "\":";
         }
 
-        // Pre-size buffer based on column count (estimated 100 bytes per column per row)
-        StringBuilder sb = new StringBuilder(Math.max(8192, colCount * 100 * 100));
+        StringBuilder sb = new StringBuilder(8192);
         sb.append('[');
+        int rowCount = 0;
 
         for (int r = 0; r < rows; r++) {
-            if (r > 0) sb.append(',');
+            if (rowCount > 0) sb.append(',');
+            rowCount++;
             sb.append('{');
             Object[] row = rowsData.get(r);
             for (int i = 0; i < colCount; i++) {
@@ -186,7 +187,7 @@ public class Benchmark {
         }
         sb.append(']');
         System.out.print(sb.toString());
-        return rows;
+        return rowCount;
     }
 
     /**
