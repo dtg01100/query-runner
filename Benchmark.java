@@ -160,8 +160,7 @@ public class Benchmark {
             keyPrefixes[i] = "\"" + escapeJson(colNames.get(i)) + "\":";
         }
 
-        // Pre-size buffer: estimated ~80 bytes per cell
-        StringBuilder sb = new StringBuilder(colCount * rows * 80 + 1024);
+        StringBuilder sb = new StringBuilder(16384);
         sb.append('[');
         boolean first = true;
 
