@@ -636,6 +636,18 @@ Daemon Mode: Enabled by default. Use --no-daemon to force single-query mode.
     Uses .env file for database connection settings.
     Autoconfigures based on DB_TYPE.
     Supported types: mysql, postgresql, oracle, sqlserver, db2, h2, sqlite
+
+Environment variables:
+    QUERY_RUNNER_DAEMON_IDLE_SECS  Seconds the daemon stays warm with no activity
+                                   before self-shutdown. Default: 120.
+                                   Set to 0 to disable auto-shutdown (daemon
+                                   runs until --daemon-stop). 120s is long
+                                   enough to keep the daemon warm across a
+                                   price-lookup batch and short enough to
+                                   release resources when you're done.
+    QUERY_RUNNER_DEBUG=1           Verbose debug output (same as --verbose)
+    QUERY_RUNNER_NO_COLOR=1        Disable color output
+    QUERY_RUNNER_NO_PROGRESS=1     Disable progress indicators
 EOF
     exit 1
 }
@@ -2057,6 +2069,12 @@ start_daemon() {
         mkdir -p "$DAEMON_CLASS_DIR"
         local temp_dir
         temp_dir=$(mktemp -d)
+        # Also copy JsonUtil.java from SCRIPT_DIR so the daemon compile picks it up.
+        # The daemon references JsonUtil.escapeJsonEmpty but the heredoc only contains
+        # QueryDaemon.java; without this copy the build fails.
+        if [[ -f "$SCRIPT_DIR/JsonUtil.java" ]]; then
+            cp "$SCRIPT_DIR/JsonUtil.java" "$temp_dir/JsonUtil.java"
+        fi
         cat > "$temp_dir/QueryDaemon.java" << 'DAEMON_EOF'
 import java.io.*;
 import java.lang.reflect.*;
@@ -2071,16 +2089,40 @@ import java.util.regex.*;
 public class QueryDaemon {
     private static final String SOCKET_PATH;
     private static final String PID_FILE;
-    private static final long IDLE_TIMEOUT_MS = 300000L;
+    // Default 120s idle before self-shutdown. Override with QUERY_RUNNER_DAEMON_IDLE_SECS.
+    // 0 disables auto-shutdown entirely (daemon runs until --daemon-stop).
+    private static final long IDLE_TIMEOUT_MS = parseIdleTimeout();
     private static final int POOL_MAX_SIZE = 10;
     private static final int POOL_MIN_IDLE = 2;
     private static final long POOL_TIMEOUT_MS = 30000L;
+
+    private static long parseIdleTimeout() {
+        String v = System.getenv("QUERY_RUNNER_DAEMON_IDLE_SECS");
+        if (v == null || v.isEmpty()) return 120000L;
+        try {
+            long secs = Long.parseLong(v.trim());
+            return secs <= 0 ? Long.MAX_VALUE : secs * 1000L;
+        } catch (NumberFormatException e) {
+            return 120000L;
+        }
+    }
 
     static {
         String baseDir = System.getProperty("user.home") + "/.query_runner";
         SOCKET_PATH = baseDir + "/daemon.sock";
         PID_FILE = baseDir + "/daemon.pid";
     }
+
+    private static boolean isDebug() {
+        String v = System.getenv("QUERY_RUNNER_DEBUG");
+        return v != null && (v.equals("1") || v.equalsIgnoreCase("true"));
+    }
+
+    private static void log(String msg) {
+        if (isDebug()) System.err.println("DEBUG: " + msg);
+    }
+
+    private static String str(String s) { return s == null ? "" : s; }
 
     private Object serverChannel;
     private final ExecutorService workerPool;
@@ -2131,14 +2173,14 @@ public class QueryDaemon {
                 .getMethod("socket").invoke(serverChannelObj);
 
             this.useUnixSocket = true;
-            System.err.println("DEBUG: QueryDaemon started on " + SOCKET_PATH);
+            log("QueryDaemon started on " + SOCKET_PATH);
         } catch (Exception e) {
-            System.err.println("DEBUG: Unix socket not available: " + e.getMessage());
-            System.err.println("DEBUG: Falling back to INET socket");
+            log("Unix socket not available: " + e.getMessage());
+            log("Falling back to INET socket");
             this.serverChannel = null;
             this.listenerSocket = new ServerSocket(0);
             this.useUnixSocket = false;
-            System.err.println("DEBUG: QueryDaemon started on port " + listenerSocket.getLocalPort());
+            log("QueryDaemon started on port " + listenerSocket.getLocalPort());
         }
     }
 
@@ -2150,7 +2192,8 @@ public class QueryDaemon {
     private void startIdleTimeout() {
         scheduler.scheduleAtFixedRate(() -> {
             if (running && System.currentTimeMillis() - lastActivityTime > IDLE_TIMEOUT_MS) {
-                System.err.println("DEBUG: Idle timeout reached, shutting down daemon");
+                long idleSecs = IDLE_TIMEOUT_MS == Long.MAX_VALUE ? -1 : IDLE_TIMEOUT_MS / 1000;
+                if (idleSecs > 0) log("Idle timeout (" + idleSecs + "s) reached, shutting down daemon");
                 shutdown();
             }
         }, 1000, 1000, TimeUnit.MILLISECONDS);
@@ -2179,7 +2222,7 @@ public class QueryDaemon {
 
             } catch (Exception e) {
                 if (running) {
-                    System.err.println("DEBUG: Accept error: " + e.getMessage());
+                    log("Accept error: " + e.getMessage());
                 }
                 break;
             }
@@ -2775,22 +2818,24 @@ public class QueryDaemon {
 
     public static void main(String[] args) {
         Properties config = new Properties();
-        config.setProperty("JDBC_URL", System.getenv("JDBC_URL"));
-        config.setProperty("JDBC_DRIVER_CLASS", System.getenv("JDBC_DRIVER_CLASS"));
-        config.setProperty("DB_USER", System.getenv("DB_USER"));
-        config.setProperty("DB_PASSWORD", System.getenv("DB_PASSWORD"));
+        // Use getenv with default "" — Properties.setProperty throws NPE on null,
+        // which would happen if any of these env vars were unset.
+        config.setProperty("JDBC_URL", str(System.getenv("JDBC_URL")));
+        config.setProperty("JDBC_DRIVER_CLASS", str(System.getenv("JDBC_DRIVER_CLASS")));
+        config.setProperty("DB_USER", str(System.getenv("DB_USER")));
+        config.setProperty("DB_PASSWORD", str(System.getenv("DB_PASSWORD")));
 
         try {
             QueryDaemon daemon = new QueryDaemon(config);
             daemon.run();
         } catch (Exception e) {
-            System.err.println("DEBUG: Daemon failed: " + e.getMessage());
+            log("Daemon failed: " + e.getMessage());
             System.exit(1);
         }
     }
 }
 DAEMON_EOF
-        if ! javac_output=$("$JAVAC_BIN" -d "$DAEMON_CLASS_DIR" "$temp_dir/QueryDaemon.java" 2>&1); then
+        if ! javac_output=$("$JAVAC_BIN" -d "$DAEMON_CLASS_DIR" "$temp_dir"/*.java 2>&1); then
             echo "Error: Failed to compile QueryDaemon: $javac_output" >&2
             rm -rf "$temp_dir"
             return 1
@@ -2798,7 +2843,7 @@ DAEMON_EOF
         rm -rf "$temp_dir"
     fi
 
-    export JDBC_URL JDBC_DRIVER_CLASS DB_USER DB_PASSWORD QUERY_RUNNER_DEBUG
+    export JDBC_URL JDBC_DRIVER_CLASS DB_USER DB_PASSWORD QUERY_RUNNER_DEBUG QUERY_RUNNER_DAEMON_IDLE_SECS
     nohup "$JAVA_BIN" --enable-native-access=ALL-UNNAMED -cp "$classpath" QueryDaemon > "$HOME/.query_runner/daemon.log" 2>&1 &
     local daemon_pid=$!
     echo "$daemon_pid" > "$DAEMON_PID_FILE"
