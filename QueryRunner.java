@@ -39,7 +39,28 @@ public class QueryRunner {
 
     private static String sanitizeOutput(String str) {
         if (str == null) return null;
-        return str.replaceAll("[\\p{Cntrl}<>\"'&`$|;]", "");
+        int len = str.length();
+        // Fast path: scan for any char that would be stripped. Most AS/400 values
+        // are plain ASCII (item codes, vendor numbers, names) and skip the copy.
+        boolean needsStrip = false;
+        for (int i = 0; i < len; i++) {
+            char c = str.charAt(i);
+            if (c < 0x20 || c == '<' || c == '>' || c == '"' || c == '\''
+                || c == '&' || c == '`' || c == '$' || c == '|' || c == ';') {
+                needsStrip = true;
+                break;
+            }
+        }
+        if (!needsStrip) return str;
+        StringBuilder sb = new StringBuilder(len);
+        for (int i = 0; i < len; i++) {
+            char c = str.charAt(i);
+            if (c >= 0x20 && c != '<' && c != '>' && c != '"' && c != '\''
+                && c != '&' && c != '`' && c != '$' && c != '|' && c != ';') {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
     }
 
     private static List<Object> parseJsonArray(String json) {
@@ -332,9 +353,11 @@ public class QueryRunner {
         while (rs.next()) {
             for (int i = 0; i < colCount; i++) {
                 if (i > 0) sb.append(',');
-                Object value = rs.getObject(i + 1);
-                if (value != null) {
-                    String strValue = value.toString();
+                // getString skips the type-inference dance of getObject; faster
+                // for text output. Caveat: getString on a numeric type returns
+                // the driver's toString which is stable for jt400/sqlite.
+                String strValue = rs.getString(i + 1);
+                if (strValue != null) {
                     strValue = sanitizeOutput(strValue);
                     sb.append('"').append(strValue.replace("\"", "\"\"")).append('"');
                 }
@@ -353,17 +376,18 @@ public class QueryRunner {
             header.append(sanitizeOutput(columnNames.get(i)));
         }
         header.append('\n');
-        
+
         StringBuilder sb = new StringBuilder(8192);
         sb.append(header);
         while (rs.next()) {
             for (int i = 0; i < colCount; i++) {
                 if (i > 0) sb.append('\t');
-                Object value = rs.getObject(i + 1);
-                if (value == null) {
+                // getString is faster than getObject().toString() for text output.
+                String strValue = rs.getString(i + 1);
+                if (strValue == null) {
                     sb.append("NULL");
                 } else {
-                    sb.append(sanitizeOutput(value.toString()));
+                    sb.append(sanitizeOutput(strValue));
                 }
             }
             sb.append('\n');
