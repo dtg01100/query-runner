@@ -462,6 +462,9 @@ get_cached_classpath() {
         current_key=$(get_classpath_cache_key)
         if [[ "$cache_key" == "$current_key" ]]; then
             debug "Using cached classpath file: $cache_file"
+            # IMPORTANT: do NOT re-append $jar_file here. The cached classpath was
+            # already constructed as "$jar_file:$libs" in build_classpath; appending
+            # $jar_file again caused it to appear 2-3 times in the daemon's -cp.
             cat "$cache_file"
             return 0
         fi
@@ -486,12 +489,18 @@ build_classpath() {
     local cached_classpath
     if cached_classpath=$(get_cached_classpath "$cache_key"); then
         debug "Using cached classpath: $cached_classpath"
-        echo "$cached_classpath:$jar_file"
+        # The cached classpath is the full "$jar_file:$libs" string. Re-appending
+        # $jar_file here caused jars to be duplicated in the daemon's -cp.
+        echo "$cached_classpath"
         return 0
     fi
 
     # Build classpath from scratch with lazy loading
-    local classpath="$jar_file"
+    # Note: do NOT initialize with $jar_file — the per-driver loops below add every
+    # matching jar. The previous "classpath=$jar_file" init caused 3.42.0.0.jar to
+    # appear twice in the classpath (once from init, once from the loop). Start empty
+    # and let the loops add a leading colon, then strip it before returning.
+    local classpath=""
     local db_type
     db_type=$(detect_database_type)
 
@@ -546,7 +555,12 @@ build_classpath() {
         done
     fi
 
-    # Save to cache
+    # Strip leading colon from the assembled classpath. The loop appends ":$jar" each
+    # iteration so the result is ":jar1:jar2:...". Java's classpath tolerates a
+    # leading colon (treats it as $PWD), but we'd rather not depend on $PWD here.
+    classpath="${classpath#:}"
+
+    # Save to cache (post-strip, so the cache stores the canonical "jar1:jar2..." form).
     save_classpath_cache "$cache_key" "$classpath"
 
     echo "$classpath"
@@ -2002,7 +2016,12 @@ DAEMON_PID_FILE="$HOME/.query_runner/daemon.pid"
 DAEMON_CLASS_DIR="$HOME/.query_runner/daemon_class"
 
 is_daemon_running() {
-    if [[ -S "$DAEMON_SOCKET" ]]; then
+    # Prefer the strongest signal (live Unix socket + pid, or live INET port + pid).
+    # Fall back to "pid file + process alive" when neither endpoint is reachable:
+    # the daemon may still be up (e.g. just-started, port file not yet written, or
+    # the just-removed stderr println during binding). Without this fallback the
+    # wrapper spawned an orphan daemon per query in default (non-debug) mode.
+    if [[ -S "$DAEMON_SOCKET" ]] && [[ -f "$DAEMON_PID_FILE" ]]; then
         if [[ -f "$DAEMON_PID_FILE" ]]; then
             local pid
             pid=$(cat "$DAEMON_PID_FILE" 2>/dev/null || echo "")
@@ -2016,6 +2035,13 @@ is_daemon_running() {
         pid=$(cat "$DAEMON_PID_FILE" 2>/dev/null || echo "")
         port=$(cat "$DAEMON_PORT_FILE" 2>/dev/null || echo "")
         if [[ -n "$pid" ]] && [[ -n "$port" ]] && kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    if [[ -f "$DAEMON_PID_FILE" ]]; then
+        local pid
+        pid=$(cat "$DAEMON_PID_FILE" 2>/dev/null || echo "")
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
             return 0
         fi
     fi
@@ -2066,6 +2092,24 @@ start_daemon() {
     classpath="$classpath:$DAEMON_CLASS_DIR"
 
     if [[ ! -d "$DAEMON_CLASS_DIR" ]] || [[ -z "$(ls -A "$DAEMON_CLASS_DIR" 2>/dev/null)" ]]; then
+        # When the directory is non-empty, we still need to verify the cache is for the
+        # current script. Without this, edits to the daemon's Java heredoc would be
+        # ignored because the existing .class files are reused.
+        local current_script_hash
+        current_script_hash=$(get_source_hash)
+        local cached_hash
+        cached_hash=$(cat "$DAEMON_CLASS_DIR/.script_hash" 2>/dev/null || echo "")
+        if [[ "$cached_hash" != "$current_script_hash" ]]; then
+            debug "Daemon class cache stale (script hash changed); recompiling"
+            rm -rf "$DAEMON_CLASS_DIR"
+        fi
+    fi
+    if [[ ! -d "$DAEMON_CLASS_DIR" ]] || [[ -z "$(ls -A "$DAEMON_CLASS_DIR" 2>/dev/null)" ]]; then
+        # Note: if the heredoc above this changes, the cached .class becomes stale but the
+        # directory isn't empty, so this branch is skipped and the daemon runs the old
+        # binary. The script-hash check above (when DAEMON_CLASS_DIR exists) catches that
+        # and nukes the directory, so the heredoc is recompiled. Without that check,
+        # editing the daemon's Java code would silently keep running the old daemon.
         mkdir -p "$DAEMON_CLASS_DIR"
         local temp_dir
         temp_dir=$(mktemp -d)
@@ -2079,8 +2123,11 @@ start_daemon() {
 import java.io.*;
 import java.lang.reflect.*;
 import java.net.*;
+import java.net.UnixDomainSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
 import java.sql.*;
 import java.util.*;
 import java.util.concurrent.*;
@@ -2089,6 +2136,7 @@ import java.util.regex.*;
 public class QueryDaemon {
     private static final String SOCKET_PATH;
     private static final String PID_FILE;
+    private static final String PORT_FILE;
     // Default 120s idle before self-shutdown. Override with QUERY_RUNNER_DAEMON_IDLE_SECS.
     // 0 disables auto-shutdown entirely (daemon runs until --daemon-stop).
     private static final long IDLE_TIMEOUT_MS = parseIdleTimeout();
@@ -2111,6 +2159,7 @@ public class QueryDaemon {
         String baseDir = System.getProperty("user.home") + "/.query_runner";
         SOCKET_PATH = baseDir + "/daemon.sock";
         PID_FILE = baseDir + "/daemon.pid";
+        PORT_FILE = baseDir + "/daemon.port";
     }
 
     private static boolean isDebug() {
@@ -2154,33 +2203,35 @@ public class QueryDaemon {
 
     private void startListener() throws Exception {
         try {
-            Class<?> unixServerSocketChannelClass = Class.forName("java.nio.channels.ServerSocketChannel");
-            Method openMethod = unixServerSocketChannelClass.getMethod("open");
-            Object serverChannelObj = openMethod.invoke(null);
-
-            Class<?> unixDomainSocketAddressClass = Class.forName("jdk.net.UnixDomainSocketAddress");
-            Method ofMethod = unixDomainSocketAddressClass.getMethod("of", String.class);
-            Object addressObj = ofMethod.invoke(null, SOCKET_PATH);
-
-            this.serverChannel = serverChannelObj;
-            Method bindMethod = serverChannelObj.getClass().getMethod("bind", SocketAddress.class);
-            bindMethod.invoke(serverChannelObj, addressObj);
-
-            Method configureBlockingMethod = serverChannelObj.getClass().getMethod("configureBlocking", boolean.class);
-            configureBlockingMethod.invoke(serverChannelObj, Boolean.TRUE);
-
-            this.listenerSocket = (ServerSocket) serverChannelObj.getClass()
-                .getMethod("socket").invoke(serverChannelObj);
-
+            // Prefer Unix domain socket (JDK 16+ direct API). Falls back to loopback INET.
+            // Unix socket is preferred because filesystem perms (chmod 600) lock it down.
+            this.serverChannel = ServerSocketChannel.open(StandardProtocolFamily.UNIX);
+            ((ServerSocketChannel) this.serverChannel).bind(UnixDomainSocketAddress.of(SOCKET_PATH));
+            ((ServerSocketChannel) this.serverChannel).configureBlocking(true);
+            this.listenerSocket = ((ServerSocketChannel) this.serverChannel).socket();
             this.useUnixSocket = true;
             log("QueryDaemon started on " + SOCKET_PATH);
         } catch (Exception e) {
             log("Unix socket not available: " + e.getMessage());
-            log("Falling back to INET socket");
+            log("Falling back to INET loopback socket (127.0.0.1)");
             this.serverChannel = null;
-            this.listenerSocket = new ServerSocket(0);
+            // Some platforms create the socket inode on open() even though bind()
+            // later fails. The wrapper would see a stale socket file and route
+            // requests to a non-existent endpoint. Delete it here so the wrapper
+            // knows to use the INET port file instead.
+            try { Files.deleteIfExists(Paths.get(SOCKET_PATH)); } catch (IOException ignored) {}
+            // Bind explicitly to 127.0.0.1 — never 0.0.0.0 — to prevent other local users
+            // from connecting to the daemon and running queries.
+            this.listenerSocket = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"));
             this.useUnixSocket = false;
-            log("QueryDaemon started on port " + listenerSocket.getLocalPort());
+            int boundPort = listenerSocket.getLocalPort();
+            log("QueryDaemon started on port " + boundPort);
+            // Write the port file directly so the wrapper doesn't have to parse the log.
+            try {
+                Files.writeString(Paths.get(PORT_FILE), Integer.toString(boundPort));
+            } catch (IOException portErr) {
+                log("Failed to write port file " + PORT_FILE + ": " + portErr.getMessage());
+            }
         }
     }
 
@@ -2204,11 +2255,9 @@ public class QueryDaemon {
             try {
                 Socket clientSocket;
                 if (useUnixSocket && serverChannel != null) {
-                    Method acceptMethod = serverChannel.getClass().getMethod("accept");
-                    Object clientChannel = acceptMethod.invoke(serverChannel);
+                    SocketChannel clientChannel = ((ServerSocketChannel) serverChannel).accept();
                     if (clientChannel == null) continue;
-                    Socket client = (Socket) clientChannel.getClass().getMethod("socket").invoke(clientChannel);
-                    clientSocket = client;
+                    clientSocket = clientChannel.socket();
                 } else {
                     clientSocket = listenerSocket.accept();
                 }
@@ -2217,8 +2266,14 @@ public class QueryDaemon {
                     clientSocket.close();
                     break;
                 }
-                lastActivityTime = System.currentTimeMillis();
-                workerPool.submit(() -> handleClient(clientSocket));
+                // lastActivityTime is updated inside the worker AFTER processRequest completes,
+                // so a flood of slow or no-op connects can no longer pin the daemon alive past
+                // the idle timeout.
+                workerPool.submit(() -> {
+                    lastActivityTime = System.currentTimeMillis();
+                    handleClient(clientSocket);
+                    lastActivityTime = System.currentTimeMillis();
+                });
 
             } catch (Exception e) {
                 if (running) {
@@ -2243,7 +2298,7 @@ public class QueryDaemon {
             writer.println(response);
 
         } catch (Exception e) {
-            System.err.println("DEBUG: Client handler error: " + e.getMessage());
+            log("Client handler error: " + e.getMessage());
         } finally {
             try { clientSocket.close(); } catch (IOException ignored) {}
         }
@@ -2289,7 +2344,10 @@ public class QueryDaemon {
                 pool = new ConnectionPool(config);
             }
 
-            try (Connection conn = pool.getConnection()) {
+            // Acquire connection from pool; explicitly return it in finally so the pool
+            // actually reuses connections instead of opening a fresh one per query.
+            Connection conn = pool.getConnection();
+            try {
                 Object paramsObj = request.get("params");
                 List<Object> params = null;
                 if (paramsObj instanceof List) {
@@ -2311,6 +2369,8 @@ public class QueryDaemon {
                         return buildQueryResponse(rs, format);
                     }
                 }
+            } finally {
+                pool.returnConnection(conn);
             }
         } catch (SQLException e) {
             return errorResponse("SQL Error: " + sanitizeError(e.getMessage()));
@@ -2739,14 +2799,27 @@ public class QueryDaemon {
         Connection getConnection() throws SQLException {
             long start = System.currentTimeMillis();
             while (System.currentTimeMillis() - start < POOL_TIMEOUT_MS) {
+                // Walk the idle list in a single pass. CopyOnWriteArrayList's iterator
+                // is a snapshot, so defer removes to a separate pass to avoid dropping
+                // a valid connection while iterating.
+                List<Connection> stale = new ArrayList<>();
+                Connection valid = null;
                 for (Connection conn : connections) {
                     if (isValid(conn)) {
-                        connections.remove(conn);
-                        activeCount++;
-                        idleCount--;
-                        return conn;
+                        if (valid == null) valid = conn;
+                    } else {
+                        stale.add(conn);
                     }
-                    connections.remove(conn);
+                }
+                if (!stale.isEmpty()) {
+                    connections.removeAll(stale);
+                    idleCount -= stale.size();
+                }
+                if (valid != null) {
+                    connections.remove(valid);
+                    activeCount++;
+                    idleCount--;
+                    return valid;
                 }
                 if (connections.size() < POOL_MAX_SIZE) {
                     Connection newConn = createConnection();
@@ -2778,6 +2851,16 @@ public class QueryDaemon {
                 connections.add(conn);
                 activeCount--;
                 idleCount++;
+            } else if (conn != null) {
+                // Connection went bad while in use; drop it and create a replacement so
+                // the pool size is preserved.
+                try { conn.close(); } catch (SQLException ignored) {}
+                Connection fresh = createConnection();
+                if (fresh != null) {
+                    connections.add(fresh);
+                    idleCount++;
+                }
+                activeCount--;
             }
         }
 
@@ -2802,7 +2885,7 @@ public class QueryDaemon {
                     config.getProperty("DB_PASSWORD")
                 );
             } catch (Exception e) {
-                System.err.println("DEBUG: Failed to create connection: " + e.getMessage());
+                log("Failed to create connection: " + e.getMessage());
                 return null;
             }
         }
@@ -2840,6 +2923,10 @@ DAEMON_EOF
             rm -rf "$temp_dir"
             return 1
         fi
+        # Record the script hash so we can detect a stale cache next time the wrapper
+        # runs. get_source_hash() hashes the query_runner script itself, so editing
+        # the daemon's Java heredoc invalidates the .class cache automatically.
+        get_source_hash > "$DAEMON_CLASS_DIR/.script_hash"
         rm -rf "$temp_dir"
     fi
 
