@@ -29,7 +29,7 @@ log_fail() {
 
 cleanup_daemon() {
 	if [[ -S "$DAEMON_SOCKET" ]]; then
-		echo '{"type":"shutdown"}' | timeout 2 socat - UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || true
+		echo '{"type":"shutdown"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || true
 	fi
 	if [[ -f "$DAEMON_PID_FILE" ]]; then
 		local pid
@@ -40,7 +40,6 @@ cleanup_daemon() {
 		fi
 	fi
 	rm -f "$DAEMON_SOCKET" "$DAEMON_PID_FILE" 2>/dev/null || true
-	rm -rf "$DAEMON_CLASS_DIR" 2>/dev/null || true
 }
 
 setup() {
@@ -80,7 +79,7 @@ else
 fi
 
 echo "Running: query_injection_blocked"
-response=$(echo '{"type":"query","sql":"SELECT * FROM users; DROP TABLE users;","format":"json"}' | timeout 2 socat - UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
+response=$(echo '{"type":"query","sql":"SELECT * FROM users; DROP TABLE users;","format":"json"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
 if echo "$response" | grep -q '"status":"error"'; then
 	log_pass "query_injection_blocked"
 else
@@ -88,7 +87,7 @@ else
 fi
 
 echo "Running: query_union_detection"
-response=$(echo '{"type":"query","sql":"SELECT * FROM users UNION SELECT * FROM orders","format":"json"}' | timeout 2 socat - UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
+response=$(echo '{"type":"query","sql":"SELECT * FROM users UNION SELECT * FROM orders","format":"json"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
 if echo "$response" | grep -q '"status":"error"' || [[ $(echo "$response" | grep -c "users\|orders" 2>/dev/null || echo "0") -ge 2 ]]; then
 	log_pass "query_union_detection"
 else
@@ -97,7 +96,7 @@ fi
 
 echo "running: query_dangerous_keywords"
 for keyword in "DROP TABLE" "DELETE FROM" "INSERT INTO" "UPDATE users"; do
-	response=$(echo "{\"type\":\"query\",\"sql\":\"$keyword\",\"format\":\"json\"}" | timeout 2 socat - UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
+	response=$(echo "{\"type\":\"query\",\"sql\":\"$keyword\",\"format\":\"json\"}" | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
 	if echo "$response" | grep -q '"status":"error"'; then
 		log_pass "query_dangerous_keyword_$keyword"
 	else
@@ -106,7 +105,7 @@ for keyword in "DROP TABLE" "DELETE FROM" "INSERT INTO" "UPDATE users"; do
 done
 
 echo "Running: error_no_credentials"
-response=$(echo '{"type":"query","sql":"SELECT * FROM sqlite_master","format":"json"}' | timeout 2 socat - UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
+response=$(echo '{"type":"query","sql":"SELECT * FROM sqlite_master","format":"json"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
 if ! echo "$response" | grep -qiE "password|passwd|secret|token"; then
 	log_pass "error_no_credentials"
 else
@@ -115,7 +114,7 @@ fi
 
 echo "Running: query_length_limit"
 long_query="SELECT * FROM users WHERE name='$(head -c 2000000 /dev/zero | tr '\0' 'a')'"
-response=$(echo "{\"type\":\"query\",\"sql\":\"$long_query\",\"format\":\"json\"}" | timeout 2 socat - UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
+response=$(echo "{\"type\":\"query\",\"sql\":\"$long_query\",\"format\":\"json\"}" | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
 if echo "$response" | grep -qi "too long\|limit\|max"; then
 	log_pass "query_length_limit"
 else
@@ -123,7 +122,7 @@ else
 fi
 
 echo "Running: null_byte_blocked"
-response=$(echo $'{"type":"query","sql":"SELECT 1\x00DROP TABLE users","format":"json"}' | timeout 2 socat - UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
+response=$(echo $'{"type":"query","sql":"SELECT 1\x00DROP TABLE users","format":"json"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
 if echo "$response" | grep -q '"status":"error"'; then
 	log_pass "null_byte_blocked"
 else
@@ -131,7 +130,7 @@ else
 fi
 
 echo "Running: read_only_enforced"
-response=$(echo '{"type":"query","sql":"CREATE TABLE test_table (id INT)","format":"json"}' | timeout 2 socat - UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
+response=$(echo '{"type":"query","sql":"CREATE TABLE test_table (id INT)","format":"json"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
 if echo "$response" | grep -q '"status":"error"'; then
 	log_pass "read_only_enforced"
 else

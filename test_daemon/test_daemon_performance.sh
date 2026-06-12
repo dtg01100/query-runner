@@ -9,6 +9,22 @@ DAEMON_SOCKET="$HOME/.query_runner/daemon.sock"
 DAEMON_PID_FILE="$HOME/.query_runner/daemon.pid"
 DAEMON_CLASS_DIR="$HOME/.query_runner/daemon_class"
 
+# Send a request to the daemon using whichever transport is available
+# (Unix socket if the kernel supports it, otherwise INET loopback via the
+# port file). Returns the response on stdout, or empty on failure.
+daemon_send() {
+	local request="$1"
+	local timeout="${2:-2}"
+	if [[ -S "$HOME/.query_runner/daemon.sock" ]]; then
+		echo "$request" | timeout "$timeout" socat UNIX-CONNECT:"$HOME/.query_runner/daemon.sock" 2>/dev/null
+	elif [[ -f "$HOME/.query_runner/daemon.port" ]]; then
+		local port
+		port=$(cat "$HOME/.query_runner/daemon.port" 2>/dev/null || echo "")
+		if [[ -n "$port" ]]; then
+			echo "$request" | timeout "$timeout" nc localhost "$port" 2>/dev/null
+		fi
+	fi
+}
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -44,7 +60,6 @@ cleanup_daemon() {
 		fi
 	fi
 	rm -f "$DAEMON_SOCKET" "$DAEMON_PID_FILE" 2>/dev/null || true
-	rm -rf "$DAEMON_CLASS_DIR" 2>/dev/null || true
 }
 
 setup() {
@@ -104,7 +119,6 @@ fi
 
 echo "Running: perf_cold_vs_warm"
 "$QUERY_RUNNER" --daemon-stop -t sqlite -d "$TEST_DB" >/dev/null 2>&1 || true
-rm -rf "$DAEMON_CLASS_DIR" 2>/dev/null || true
 rm -rf "$HOME/.query_runner/cache" 2>/dev/null || true
 sleep 1
 

@@ -29,7 +29,7 @@ log_fail() {
 
 cleanup_daemon() {
 	if [[ -S "$DAEMON_SOCKET" ]]; then
-		echo '{"type":"shutdown"}' | timeout 2 socat - UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || true
+		echo '{"type":"shutdown"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || true
 	fi
 	if [[ -f "$DAEMON_PID_FILE" ]]; then
 		local pid
@@ -40,7 +40,6 @@ cleanup_daemon() {
 		fi
 	fi
 	rm -f "$DAEMON_SOCKET" "$DAEMON_PID_FILE" 2>/dev/null || true
-	rm -rf "$DAEMON_CLASS_DIR" 2>/dev/null || true
 }
 
 setup() {

@@ -29,7 +29,7 @@ log_fail() {
 
 cleanup_daemon() {
 	if [[ -S "$DAEMON_SOCKET" ]]; then
-		echo '{"type":"shutdown"}' | timeout 2 socat - UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || true
+		echo '{"type":"shutdown"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || true
 	fi
 	if [[ -f "$DAEMON_PORT_FILE" ]]; then
 		port=$(cat "$DAEMON_PORT_FILE" 2>/dev/null || echo "")
@@ -45,7 +45,6 @@ cleanup_daemon() {
 		fi
 	fi
 	rm -f "$DAEMON_SOCKET" "$DAEMON_PORT_FILE" "$DAEMON_PID_FILE" 2>/dev/null || true
-	rm -rf "$DAEMON_CLASS_DIR" 2>/dev/null || true
 }
 
 wait_for_daemon() {
@@ -73,7 +72,7 @@ daemon_query() {
 daemon_send() {
 	local message="$1"
 	if [[ -S "$DAEMON_SOCKET" ]]; then
-		echo "$message" | timeout 2 socat - UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null
+		echo "$message" | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null
 	elif [[ -f "$DAEMON_PORT_FILE" ]]; then
 		port=$(cat "$DAEMON_PORT_FILE" 2>/dev/null || echo "")
 		if [[ -n "$port" ]]; then

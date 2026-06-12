@@ -2134,6 +2134,7 @@ import java.io.*;
 import java.lang.reflect.*;
 import java.net.*;
 import java.net.UnixDomainSocketAddress;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.nio.channels.ServerSocketChannel;
@@ -2215,14 +2216,20 @@ public class QueryDaemon {
         try {
             // Prefer Unix domain socket (JDK 16+ direct API). Falls back to loopback INET.
             // Unix socket is preferred because filesystem perms (chmod 600) lock it down.
+            //
+            // Note: we deliberately do NOT call ServerSocketChannel.socket() on
+            // the returned channel — JDK 26's ServerSocketChannelImpl.socket()
+            // throws UnsupportedOperationException for UNIX-family channels.
+            // The accept loop in run() uses ServerSocketChannel.accept() directly,
+            // so we don't need the legacy java.net.ServerSocket wrapper here.
             this.serverChannel = ServerSocketChannel.open(StandardProtocolFamily.UNIX);
             ((ServerSocketChannel) this.serverChannel).bind(UnixDomainSocketAddress.of(SOCKET_PATH));
             ((ServerSocketChannel) this.serverChannel).configureBlocking(true);
-            this.listenerSocket = ((ServerSocketChannel) this.serverChannel).socket();
+            this.listenerSocket = null;
             this.useUnixSocket = true;
             log("QueryDaemon started on " + SOCKET_PATH);
         } catch (Exception e) {
-            log("Unix socket not available: " + e.getMessage());
+            log("Unix socket not available: " + e.getClass().getSimpleName() + ": " + e.getMessage());
             log("Falling back to INET loopback socket (127.0.0.1)");
             this.serverChannel = null;
             // Some platforms create the socket inode on open() even though bind()
@@ -2263,17 +2270,21 @@ public class QueryDaemon {
     public void run() {
         while (running) {
             try {
-                Socket clientSocket;
+                // Accept on the appropriate channel. JDK 26's
+                // ServerSocketChannel.socket() / SocketChannel.socket() throw
+                // UnsupportedOperationException for Unix-domain sockets, so
+                // we use the channel APIs exclusively and avoid the legacy
+                // java.net.ServerSocket / java.net.Socket wrappers.
+                SocketChannel clientChannel;
                 if (useUnixSocket && serverChannel != null) {
-                    SocketChannel clientChannel = ((ServerSocketChannel) serverChannel).accept();
-                    if (clientChannel == null) continue;
-                    clientSocket = clientChannel.socket();
+                    clientChannel = ((ServerSocketChannel) serverChannel).accept();
                 } else {
-                    clientSocket = listenerSocket.accept();
+                    clientChannel = listenerSocket.getChannel().accept();
                 }
+                if (clientChannel == null) continue;
 
                 if (!running) {
-                    clientSocket.close();
+                    clientChannel.close();
                     break;
                 }
                 // lastActivityTime is updated inside the worker AFTER processRequest completes,
@@ -2281,36 +2292,61 @@ public class QueryDaemon {
                 // the idle timeout.
                 workerPool.submit(() -> {
                     lastActivityTime = System.currentTimeMillis();
-                    handleClient(clientSocket);
+                    handleClient(clientChannel);
                     lastActivityTime = System.currentTimeMillis();
                 });
 
             } catch (Exception e) {
                 if (running) {
-                    log("Accept error: " + e.getMessage());
+                    log("Accept error: " + e.getClass().getSimpleName() + ": " + e.getMessage());
                 }
                 break;
             }
         }
     }
 
-    private void handleClient(Socket clientSocket) {
+    private void handleClient(SocketChannel clientChannel) {
         try {
-            BufferedReader reader = new BufferedReader(
-                new InputStreamReader(clientSocket.getInputStream(), StandardCharsets.UTF_8));
-            PrintWriter writer = new PrintWriter(
-                new OutputStreamWriter(clientSocket.getOutputStream(), StandardCharsets.UTF_8), true);
+            // Line-delimited JSON protocol: read bytes until '\n', write the
+            // response followed by '\n'. Using ByteBuffer directly avoids the
+            // legacy java.net.Socket API that throws on Unix-domain channels
+            // under JDK 26.
+            ByteBuffer buf = ByteBuffer.allocate(8192);
+            StringBuilder request = new StringBuilder();
+            // Read until we see a newline or the peer closes.
+            while (request.indexOf("\n") < 0) {
+                buf.clear();
+                int n = clientChannel.read(buf);
+                if (n < 0) return; // peer closed
+                if (n == 0) continue; // spurious wakeup
+                buf.flip();
+                byte[] data = new byte[n];
+                buf.get(data);
+                request.append(new String(data, StandardCharsets.UTF_8));
+                // Defensive cap: refuse requests larger than 1 MiB.
+                if (request.length() > 1024 * 1024) {
+                    writeResponse(clientChannel, errorResponse("Request too large"));
+                    return;
+                }
+            }
+            String line = request.substring(0, request.indexOf("\n")).trim();
+            if (line.isEmpty()) return;
 
-            String line = reader.readLine();
-            if (line == null) return;
-
-            String response = processRequest(line.trim());
-            writer.println(response);
+            String response = processRequest(line);
+            writeResponse(clientChannel, response);
 
         } catch (Exception e) {
-            log("Client handler error: " + e.getMessage());
+            log("Client handler error: " + e.getClass().getSimpleName() + ": " + e.getMessage());
         } finally {
-            try { clientSocket.close(); } catch (IOException ignored) {}
+            try { clientChannel.close(); } catch (IOException ignored) {}
+        }
+    }
+
+    private void writeResponse(SocketChannel channel, String response) throws IOException {
+        byte[] data = (response + "\n").getBytes(StandardCharsets.UTF_8);
+        ByteBuffer out = ByteBuffer.wrap(data);
+        while (out.hasRemaining()) {
+            channel.write(out);
         }
     }
 
@@ -2592,7 +2628,18 @@ public class QueryDaemon {
 
     private String handleShutdown() {
         running = false;
-        shutdown();
+        // Note: we do NOT call shutdown() here. shutdown() calls
+        // workerPool.awaitTermination() which would block waiting for this
+        // very worker thread (we are running inside the worker) to finish,
+        // so the response would never be flushed to the client before the
+        // socket closed. Instead, schedule the actual teardown on a fresh
+        // thread AFTER this response string is sent.
+        Thread shutdownHook = new Thread(() -> {
+            try { Thread.sleep(50); } catch (InterruptedException ignored) {}
+            shutdown();
+        }, "daemon-shutdown-hook");
+        shutdownHook.setDaemon(true);
+        shutdownHook.start();
         return "{\"status\":\"ok\",\"message\":\"Daemon shutdown complete\"}";
     }
 

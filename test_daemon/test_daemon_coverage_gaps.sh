@@ -25,7 +25,7 @@ log_skip() { echo -e "${YELLOW}⊘${NC} $1 (skipped)"; TESTS_SKIPPED=$((TESTS_SK
 
 cleanup_daemon() {
     if [[ -S "$DAEMON_SOCKET" ]]; then
-        echo '{"type":"shutdown"}' | timeout 2 socat - UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || true
+        echo '{"type":"shutdown"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || true
     fi
     if [[ -f "$DAEMON_PORT_FILE" ]]; then
         port=$(cat "$DAEMON_PORT_FILE" 2>/dev/null || echo "")
@@ -41,7 +41,6 @@ cleanup_daemon() {
         fi
     fi
     rm -f "$DAEMON_SOCKET" "$DAEMON_PORT_FILE" "$DAEMON_PID_FILE" 2>/dev/null || true
-    rm -rf "$DAEMON_CLASS_DIR" ~/.query_runner/cache 2>/dev/null || true
 }
 
 wait_for_daemon() {
@@ -132,14 +131,14 @@ echo "Running: daemon_query_timeout"
 cleanup_daemon
 "$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
-port=$(cat "$DAEMON_PORT_FILE" 2>/dev/null || echo "")
-output=$(timeout 5 bash -c "echo '{\"type\":\"query\",\"sql\":\"SELECT 1\",\"format\":\"text\"}' | nc -w 1 localhost $port" 2>/dev/null || echo "timeout")
+# Use the wrapper instead of raw nc — the wrapper transparently picks
+# the daemon's transport (Unix socket if available, INET otherwise).
+output=$(timeout 5 "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -f text -q "SELECT 1" 2>/dev/null || echo "timeout")
 if echo "$output" | grep -q "1"; then
     log_pass "daemon_query_timeout"
 else
     log_fail "daemon_query_timeout"
 fi
-
 echo "Running: daemon_graceful_shutdown_pending"
 cleanup_daemon
 "$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" > /dev/null 2>&1
@@ -225,13 +224,14 @@ echo "Running: daemon_status_query"
 cleanup_daemon
 "$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
-response=$(echo '{"type":"status"}' | timeout 2 nc localhost $(cat "$DAEMON_PORT_FILE") 2>/dev/null || echo '{}')
+# Use the wrapper's --daemon-status which talks to the daemon
+# transport-agnostically (Unix socket if available, INET otherwise).
+response=$("$QUERY_RUNNER" --daemon-status -t sqlite -d "$TEST_DB" 2>/dev/null || echo "")
 if echo "$response" | grep -q '"status":"ok"'; then
     log_pass "daemon_status_query"
 else
     log_fail "daemon_status_query"
 fi
-
 echo "Running: daemon_concurrent_different_formats"
 cleanup_daemon
 "$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" > /dev/null 2>&1

@@ -29,7 +29,7 @@ log_fail() {
 
 cleanup_daemon() {
 	if [[ -S "$DAEMON_SOCKET" ]]; then
-		echo '{"type":"shutdown"}' | timeout 2 socat - UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || true
+		echo '{"type":"shutdown"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || true
 	fi
 	if [[ -f "$DAEMON_PID_FILE" ]]; then
 		local pid
@@ -40,7 +40,6 @@ cleanup_daemon() {
 		fi
 	fi
 	rm -f "$DAEMON_SOCKET" "$DAEMON_PID_FILE" 2>/dev/null || true
-	rm -rf "$DAEMON_CLASS_DIR" 2>/dev/null || true
 }
 
 setup() {
@@ -60,11 +59,11 @@ setup
 echo "=== Connection Pool Tests ==="
 
 echo "Running: pool_connection_reuse"
-response=$(echo '{"type":"status"}' | timeout 2 socat - UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
+response=$(echo '{"type":"status"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
 if echo "$response" | grep -q 'idle_connections'; then
 	idle1=$(echo "$response" | grep -o '"idle_connections":[0-9]*' | grep -o '[0-9]*' || echo "0")
 	"$QUERY_RUNNER" -t sqlite -d "$TEST_DB" "SELECT 1" >/dev/null 2>&1
-	response=$(echo '{"type":"status"}' | timeout 2 socat - UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
+	response=$(echo '{"type":"status"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
 	idle2=$(echo "$response" | grep -o '"idle_connections":[0-9]*' | grep -o '[0-9]*' || echo "0")
 	if [[ "$idle1" == "$idle2" ]] || [[ "$idle1" -ge 1 ]]; then
 		log_pass "pool_connection_reuse"
@@ -99,7 +98,7 @@ else
 fi
 
 echo "Running: pool_connection_validity"
-response=$(echo '{"type":"status"}' | timeout 2 socat - UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
+response=$(echo '{"type":"status"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
 if echo "$response" | grep -q '"status":"ok"'; then
 	log_pass "pool_connection_validity"
 else
