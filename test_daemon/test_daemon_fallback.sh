@@ -58,7 +58,7 @@ echo "=== Daemon Fallback Tests ==="
 
 echo "Running: fallback_socket_missing"
 cleanup_daemon
-output=$("$QUERY_RUNNER" --no-daemon -t sqlite -d "$TEST_DB" "SELECT 1" 2>&1)
+output=$("$QUERY_RUNNER" --no-daemon -t sqlite -d "$TEST_DB" -q "SELECT 1" 2>&1)
 if echo "$output" | grep -q "1"; then
 	log_pass "fallback_socket_missing"
 else
@@ -70,7 +70,7 @@ echo "Running: fallback_socket_busy"
 pid=$(cat "$DAEMON_PID_FILE" 2>/dev/null || echo "")
 kill -9 "$pid" 2>/dev/null || true
 sleep 0.5
-output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" "SELECT 1" 2>&1)
+output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT 1" 2>&1)
 if echo "$output" | grep -q "1"; then
 	log_pass "fallback_socket_busy"
 else
@@ -79,7 +79,7 @@ fi
 
 echo "Running: fallback_explicit_flag"
 cleanup_daemon
-output=$("$QUERY_RUNNER" --no-daemon -t sqlite -d "$TEST_DB" "SELECT 1 as val" 2>&1)
+output=$("$QUERY_RUNNER" --no-daemon -t sqlite -d "$TEST_DB" -q "SELECT 1 as val" 2>&1)
 if [[ -S "$DAEMON_SOCKET" ]]; then
 	log_fail "fallback_explicit_flag - daemon should not start"
 else
@@ -91,7 +91,7 @@ echo "Running: fallback_daemon_crash"
 pid=$(cat "$DAEMON_PID_FILE" 2>/dev/null || echo "")
 kill -9 "$pid" 2>/dev/null || true
 sleep 0.5
-output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" "SELECT 1" 2>&1)
+output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT 1" 2>&1)
 if echo "$output" | grep -q "1"; then
 	log_pass "fallback_daemon_crash"
 else
@@ -101,7 +101,7 @@ fi
 echo "Running: fallback_connection_refused"
 cleanup_daemon
 touch "$DAEMON_SOCKET"
-output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" "SELECT 1" 2>&1)
+output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT 1" 2>&1)
 if echo "$output" | grep -q "1"; then
 	log_pass "fallback_connection_refused"
 else

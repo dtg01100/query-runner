@@ -3209,6 +3209,13 @@ if [[ -n "$DAEMON_ACTION" ]]; then
             exit $?
             ;;
         restart)
+            # start_daemon references $JAR_FILE and other env-derived
+            # variables, which require load_env under set -u. Other
+            # daemon actions (start, stop, status) call this implicitly
+            # via their helpers; restart's helper (restart_daemon)
+            # composes start_daemon + stop_daemon without going through
+            # the action handlers, so it needs the load here.
+            load_env
             restart_daemon
             exit $?
             ;;

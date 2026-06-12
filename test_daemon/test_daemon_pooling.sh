@@ -45,7 +45,11 @@ cleanup_daemon() {
 setup() {
 	cleanup_daemon
 	"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" >/dev/null 2>&1 || true
-	sleep 1
+	for i in 1 2 3 4 5 6 7 8 9 10; do
+		if [[ -S "$DAEMON_SOCKET" ]] || [[ -f "$DAEMON_PORT_FILE" ]]; then return 0; fi
+		sleep 0.5
+	done
+	return 1
 }
 
 teardown() {
@@ -59,16 +63,20 @@ setup
 echo "=== Connection Pool Tests ==="
 
 echo "Running: pool_connection_reuse"
+# The daemon's pool is lazy: it's only created on the first query,
+# not at daemon startup. So idle1 (before any query) is 0, and
+# idle2 (after the query returned the connection) should be >= 1.
+# What we're verifying is that the connection was *returned* to
+# the pool, not eagerly created and abandoned.
 response=$(echo '{"type":"status"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
 if echo "$response" | grep -q 'idle_connections'; then
-	idle1=$(echo "$response" | grep -o '"idle_connections":[0-9]*' | grep -o '[0-9]*' || echo "0")
-	"$QUERY_RUNNER" -t sqlite -d "$TEST_DB" "SELECT 1" >/dev/null 2>&1
+	"$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1
 	response=$(echo '{"type":"status"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
 	idle2=$(echo "$response" | grep -o '"idle_connections":[0-9]*' | grep -o '[0-9]*' || echo "0")
-	if [[ "$idle1" == "$idle2" ]] || [[ "$idle1" -ge 1 ]]; then
+	if [[ "$idle2" -ge 1 ]]; then
 		log_pass "pool_connection_reuse"
 	else
-		log_fail "pool_connection_reuse - connections not being reused"
+		log_fail "pool_connection_reuse - connection not returned to pool (idle2=$idle2)"
 	fi
 else
 	log_fail "pool_connection_reuse - pool status not available"
@@ -78,7 +86,7 @@ echo "Running: pool_max_connections"
 pids=()
 for i in {1..15}; do
 	(
-		output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" "SELECT $i" 2>/dev/null)
+		output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT $i" 2>/dev/null)
 		if [[ -n "$output" ]]; then
 			exit 0
 		else
@@ -106,13 +114,13 @@ else
 fi
 
 echo "Running: pool_query_uses_pool"
-first_time=$({ time "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" "SELECT 1" >/dev/null 2>&1; } 2>&1)
-second_time=$({ time "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" "SELECT 1" >/dev/null 2>&1; } 2>&1)
+first_time=$({ time "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1; } 2>&1)
+second_time=$({ time "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1; } 2>&1)
 log_pass "pool_query_uses_pool"
 
 echo "Running: pool_multiple_queries_same_connection"
 for i in {1..5}; do
-	output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" "SELECT COUNT(*) FROM users" 2>/dev/null)
+	output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT COUNT(*) FROM users" 2>/dev/null)
 	if ! echo "$output" | grep -q "[0-9]"; then
 		log_fail "pool_multiple_queries_same_connection"
 		break
@@ -124,7 +132,7 @@ fi
 
 echo "Running: pool_sequential_queries"
 for i in {1..10}; do
-	output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" "SELECT $i as val" 2>/dev/null)
+	output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT $i as val" 2>/dev/null)
 	if ! echo "$output" | grep -q "$i"; then
 		log_fail "pool_sequential_queries - query $i failed"
 		break

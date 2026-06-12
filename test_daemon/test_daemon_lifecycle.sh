@@ -65,8 +65,23 @@ wait_for_daemon() {
 	return 1
 }
 
+# Run a query through the wrapper. The wrapper treats a leading option
+# (e.g. -f json) as an option and the trailing positional arg as the SQL.
+# Without -q, the wrapper reads the positional arg as a query *file path*
+# and fails with "Query file not found". So we always pass the SQL via -q.
 daemon_query() {
-	"$QUERY_RUNNER" -t sqlite -d "$TEST_DB" "$@" 2>/dev/null
+	local opts=()
+	local sql=""
+	# If the last arg does not start with '-', treat it as SQL.
+	if [[ "${@: -1}" != -* ]]; then
+		sql="${@: -1}"
+		opts=("${@:1:$#-1}")
+	fi
+	if [[ ${#opts[@]} -gt 0 ]]; then
+		"$QUERY_RUNNER" -t sqlite -d "$TEST_DB" "${opts[@]}" -q "$sql" 2>/dev/null
+	else
+		"$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "$sql" 2>/dev/null
+	fi
 }
 
 daemon_send() {
