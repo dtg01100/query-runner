@@ -628,8 +628,9 @@ Options:
       --daemon-start         Start the daemon process
       --daemon-stop          Stop the daemon process
       --daemon-restart       Restart the daemon process
-      --daemon-status        Check daemon status
-      --allow-union-tables TABLES  Comma-separated list of tables allowed in UNION queries
+     --daemon-status        Check daemon status
+     --daemon-systemd       Run the daemon in foreground. Invoked by the
+                            systemd service unit, not for direct use.
      -q, --query QUERY        SQL query to execute (instead of reading from file or stdin)
      --version              Show version information
      -h, --help              Show this help message
@@ -1986,6 +1987,14 @@ while [[ $# -gt 0 ]]; do
             DAEMON_ACTION="status"
             shift
             ;;
+        --daemon-systemd)
+            # Run the daemon in foreground (no nohup/&). Invoked by the
+            # systemd service unit so the daemon's lifecycle is supervised
+            # (Type=simple, TimeoutStopSec, journald logging, etc.). The
+            # JVM's IDLE_TIMEOUT_MS is preserved for in-proc lazy unload.
+            DAEMON_ACTION="systemd"
+            shift
+            ;;
         --help)
             usage
             ;;
@@ -2077,13 +2086,14 @@ get_daemon_pid() {
 }
 
 start_daemon() {
-    if is_daemon_running; then
+    local foreground="${1:-}"
+    if [[ "$foreground" != "foreground" ]] && is_daemon_running; then
         debug "Daemon already running (PID: $(get_daemon_pid))"
         return 0
     fi
+    debug "Starting daemon${foreground:+ (foreground, for systemd)}..."
 
-    debug "Starting daemon..."
-
+    init_cache
     mkdir -p "$HOME/.query_runner"
     chmod 700 "$HOME/.query_runner" 2>/dev/null || true
 
@@ -2931,6 +2941,13 @@ DAEMON_EOF
     fi
 
     export JDBC_URL JDBC_DRIVER_CLASS DB_USER DB_PASSWORD QUERY_RUNNER_DEBUG QUERY_RUNNER_DAEMON_IDLE_SECS
+    if [[ "$foreground" == "foreground" ]]; then
+        # Foreground mode (used by --daemon-systemd): replace this shell
+        # with the JVM so systemd's process supervision works. The
+        # daemon's own IDLE_TIMEOUT_MS handles lazy unload; systemd
+        # handles session-lifecycle cleanup.
+        exec "$JAVA_BIN" --enable-native-access=ALL-UNNAMED -cp "$classpath" QueryDaemon
+    fi
     nohup "$JAVA_BIN" --enable-native-access=ALL-UNNAMED -cp "$classpath" QueryDaemon > "$HOME/.query_runner/daemon.log" 2>&1 &
     local daemon_pid=$!
     echo "$daemon_pid" > "$DAEMON_PID_FILE"
@@ -3150,6 +3167,16 @@ if [[ -n "$DAEMON_ACTION" ]]; then
             ;;
         status)
             daemon_status
+            exit $?
+            ;;
+        systemd)
+            # Invoked by the systemd service unit. The daemon is
+            # supervised by systemd, so this entry point is a thin
+            # wrapper: load env, compile (idempotent), exec JVM in
+            # foreground. systemd handles process lifecycle; the
+            # daemon's IDLE_TIMEOUT_MS handles lazy unload.
+            load_env
+            start_daemon foreground
             exit $?
             ;;
         *)

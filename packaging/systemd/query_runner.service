@@ -1,0 +1,34 @@
+[Unit]
+Description=Query Runner daemon
+Documentation=https://github.com/dlafreniere/query_runner
+# The daemon's own IDLE_TIMEOUT_MS (default 120s, override via
+# QUERY_RUNNER_DAEMON_IDLE_SECS) handles lazy unload. TimeoutStopSec
+# gives the JVM a clean shutdown window before SIGKILL.
+TimeoutStopSec=15
+
+[Service]
+Type=simple
+# Adjust the path to your actual query_runner install. --daemon-systemd
+# runs the JVM in foreground so systemd sees the JVM as the supervised
+# process and journald captures its output.
+ExecStart=/usr/bin/query_runner --daemon-systemd
+# Send SIGTERM on stop, allowing the daemon to flush a clean response
+# if a client is mid-request before the JVM exits.
+KillMode=mixed
+KillSignal=SIGTERM
+# Hardening: don't run the JVM with privileges it doesn't need.
+# Lock the working directory and protect /home from the daemon.
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=%h/.query_runner
+# Read JDBC credentials from a user-owned env file. Create this at
+#   ~/.config/query_runner/env
+# with the same KEY=VALUE lines as the .env in the project root.
+EnvironmentFile=-%h/.config/query_runner/env
+# No socket unit on purpose: the daemon's Unix socket lives in the
+# user's runtime dir with mode 0600. The user's session lifecycle
+# (logout / unit stop) is the unload signal; the JVM's idle timeout
+# is the lazy unload within a session.
+
+[Install]
+WantedBy=default.target
