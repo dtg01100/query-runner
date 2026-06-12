@@ -107,12 +107,12 @@ fi
 
 echo "Running: protocol_shutdown"
 response=$(echo '{"type":"shutdown"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
-# Poll for socket removal. The shutdown response is sent before the
-# socket is unlinked (handleShutdown schedules a 50ms-delayed cleanup
-# on a separate thread so the response can flush first).
-for i in 1 2 3 4 5 6 7 8 9 10; do
+# The deferred shutdown runs shutdown() on a separate thread, which calls
+# workerPool.awaitTermination(5s) — so the socket may take up to ~5s
+# to disappear. Poll for up to 8s to leave a small margin.
+for i in $(seq 1 80); do
 	if [[ ! -S "$DAEMON_SOCKET" ]]; then break; fi
-	sleep 0.2
+	sleep 0.1
 done
 if [[ ! -S "$DAEMON_SOCKET" ]]; then
 	log_pass "protocol_shutdown"
