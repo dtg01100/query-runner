@@ -1,12 +1,13 @@
 #!/bin/bash
 
-set -euo pipefail
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QUERY_RUNNER="$SCRIPT_DIR/../query_runner"
 TEST_DB="$SCRIPT_DIR/test_daemon.db"
 DAEMON_SOCKET="$HOME/.query_runner/daemon.sock"
 DAEMON_PID_FILE="$HOME/.query_runner/daemon.pid"
+DAEMON_PORT_FILE="$HOME/.query_runner/daemon.port"
 DAEMON_CLASS_DIR="$HOME/.query_runner/daemon_class"
 
 RED='\033[0;31m'
@@ -26,7 +27,7 @@ setup_test_db() {
 
 cleanup_daemon() {
 	if [[ -S "$DAEMON_SOCKET" ]]; then
-		echo '{"type":"shutdown"}' | timeout 2 socat - UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || true
+		echo '{"type":"shutdown"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" 2>/dev/null || true
 	fi
 	if [[ -f "$DAEMON_PID_FILE" ]]; then
 		local pid
@@ -78,52 +79,58 @@ check_socat
 
 setup_test_db
 
+# Each sub-suite has its own pass/fail counters and prints its own summary.
+# We propagate the exit code so a failing suite is observable from CI / the
+# top-level run_all_tests.sh. set -e is intentionally NOT enabled (see
+# top-of-file): we want to run all suites even when the first one fails.
+SUITE_RC=0
+
 if [[ "${1:-all}" == "lifecycle" ]] || [[ "${1:-all}" == "all" ]]; then
 	echo ""
 	echo "=== Running Lifecycle Tests ==="
-	bash "$SCRIPT_DIR/test_daemon_lifecycle.sh" || true
+	bash "$SCRIPT_DIR/test_daemon_lifecycle.sh" || SUITE_RC=1
 fi
 
 if [[ "${1:-all}" == "protocol" ]] || [[ "${1:-all}" == "all" ]]; then
 	echo ""
 	echo "=== Running Protocol Tests ==="
-	bash "$SCRIPT_DIR/test_daemon_protocol.sh" || true
+	bash "$SCRIPT_DIR/test_daemon_protocol.sh" || SUITE_RC=1
 fi
 
 if [[ "${1:-all}" == "fallback" ]] || [[ "${1:-all}" == "all" ]]; then
 	echo ""
 	echo "=== Running Fallback Tests ==="
-	bash "$SCRIPT_DIR/test_daemon_fallback.sh" || true
+	bash "$SCRIPT_DIR/test_daemon_fallback.sh" || SUITE_RC=1
 fi
 
 if [[ "${1:-all}" == "pooling" ]] || [[ "${1:-all}" == "all" ]]; then
 	echo ""
 	echo "=== Running Pooling Tests ==="
-	bash "$SCRIPT_DIR/test_daemon_pooling.sh" || true
+	bash "$SCRIPT_DIR/test_daemon_pooling.sh" || SUITE_RC=1
 fi
 
 if [[ "${1:-all}" == "security" ]] || [[ "${1:-all}" == "all" ]]; then
 	echo ""
 	echo "=== Running Security Tests ==="
-	bash "$SCRIPT_DIR/test_daemon_security.sh" || true
+	bash "$SCRIPT_DIR/test_daemon_security.sh" || SUITE_RC=1
 fi
 
 if [[ "${1:-all}" == "concurrency" ]] || [[ "${1:-all}" == "all" ]]; then
 	echo ""
 	echo "=== Running Concurrency Tests ==="
-	bash "$SCRIPT_DIR/test_daemon_concurrency.sh" || true
+	bash "$SCRIPT_DIR/test_daemon_concurrency.sh" || SUITE_RC=1
 fi
 
 if [[ "${1:-all}" == "performance" ]] || [[ "${1:-all}" == "all" ]]; then
 	echo ""
 	echo "=== Running Performance Tests ==="
-	bash "$SCRIPT_DIR/test_daemon_performance.sh" || true
+	bash "$SCRIPT_DIR/test_daemon_performance.sh" || SUITE_RC=1
 fi
 
 if [[ "${1:-all}" == "coverage" ]] || [[ "${1:-all}" == "all" ]]; then
 	echo ""
 	echo "=== Running Coverage Gap Tests ==="
-	bash "$SCRIPT_DIR/test_daemon_coverage_gaps.sh" || true
+	bash "$SCRIPT_DIR/test_daemon_coverage_gaps.sh" || SUITE_RC=1
 fi
 
 echo ""
@@ -132,7 +139,7 @@ echo -e "Passed: ${GREEN}$TESTS_PASSED${NC}"
 echo -e "Failed: ${RED}$TESTS_FAILED${NC}"
 echo -e "Skipped: ${YELLOW}$TESTS_SKIPPED${NC}"
 
-if [[ $TESTS_FAILED -eq 0 ]]; then
+if [[ $TESTS_FAILED -eq 0 ]] && [[ $SUITE_RC -eq 0 ]]; then
 	exit 0
 else
 	exit 1

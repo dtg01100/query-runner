@@ -7,6 +7,7 @@ QUERY_RUNNER="$SCRIPT_DIR/../query_runner"
 TEST_DB="$SCRIPT_DIR/test_daemon.db"
 DAEMON_SOCKET="$HOME/.query_runner/daemon.sock"
 DAEMON_PID_FILE="$HOME/.query_runner/daemon.pid"
+DAEMON_PORT_FILE="$HOME/.query_runner/daemon.port"
 DAEMON_CLASS_DIR="$HOME/.query_runner/daemon_class"
 
 RED='\033[0;31m'
@@ -44,7 +45,7 @@ cleanup_daemon() {
 
 setup() {
 	cleanup_daemon
-	"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" >/dev/null 2>&1 || true
+	"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1 || true
 	# Poll for the socket. On a cold class cache, the daemon takes
 	# 3-4s to compile + bind (JDK 26's javac is slower than 8/17).
 	for i in 1 2 3 4 5 6 7 8 9 10; do
@@ -68,7 +69,7 @@ echo "Running: concurrent_queries_5"
 pids=()
 for i in {1..5}; do
 	(
-		output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT $i as val" 2>/dev/null)
+		output=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT $i as val" 2>/dev/null)
 		if echo "$output" | grep -q "$i"; then
 			exit 0
 		else
@@ -91,7 +92,7 @@ echo "Running: concurrent_queries_10"
 pids=()
 for i in {1..10}; do
 	(
-		output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT $i as val" 2>/dev/null)
+		output=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT $i as val" 2>/dev/null)
 		if echo "$output" | grep -q "$i"; then
 			exit 0
 		else
@@ -114,7 +115,7 @@ echo "Running: concurrent_queries_20"
 pids=()
 for i in {1..20}; do
 	(
-		output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT $i as val" 2>/dev/null)
+		output=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT $i as val" 2>/dev/null)
 		if echo "$output" | grep -q "$i"; then
 			exit 0
 		else
@@ -137,7 +138,7 @@ echo "Running: concurrent_mixed_formats"
 pids=()
 for i in {1..5}; do
 	(
-		output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -f json -q "SELECT $i as val" 2>/dev/null)
+		output=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -f json -q "SELECT $i as val" 2>/dev/null)
 		if echo "$output" | grep -q '"val"'; then
 			exit 0
 		else
@@ -148,7 +149,7 @@ for i in {1..5}; do
 done
 for i in {6..10}; do
 	(
-		output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -f csv -q "SELECT $i as val" 2>/dev/null)
+		output=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -f csv -q "SELECT $i as val" 2>/dev/null)
 		if echo "$output" | grep -q "val"; then
 			exit 0
 		else
@@ -171,7 +172,7 @@ echo "Running: concurrent_same_table"
 pids=()
 for i in {1..10}; do
 	(
-		output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT * FROM users WHERE id = $((i % 5 + 1))" 2>/dev/null)
+		output=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT * FROM users WHERE id = $((i % 5 + 1))" 2>/dev/null)
 		if [[ -n "$output" ]]; then
 			exit 0
 		else
@@ -191,9 +192,9 @@ else
 fi
 
 echo "Running: concurrent_error_isolation"
-"$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT * FROM nonexistent" >/dev/null 2>&1 &
+"$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT * FROM nonexistent" >/dev/null 2>&1 &
 error_pid=$!
-"$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT 1 as val" >/dev/null 2>&1 &
+"$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT 1 as val" >/dev/null 2>&1 &
 valid_pid=$!
 wait "$error_pid" 2>/dev/null || true
 wait "$valid_pid" 2>/dev/null
@@ -207,7 +208,7 @@ echo "Running: concurrent_daemon_stable"
 pids=()
 for i in {1..10}; do
 	(
-		output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT $i" 2>/dev/null)
+		output=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT $i" 2>/dev/null)
 		exit 0
 	) &
 	pids+=($!)

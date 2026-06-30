@@ -66,11 +66,11 @@ else
 fi
 
 echo "Running: fallback_socket_busy"
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" >/dev/null 2>&1 || true
+"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1 || true
 pid=$(cat "$DAEMON_PID_FILE" 2>/dev/null || echo "")
 kill -9 "$pid" 2>/dev/null || true
 sleep 0.5
-output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT 1" 2>&1)
+output=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT 1" 2>&1)
 if echo "$output" | grep -q "1"; then
 	log_pass "fallback_socket_busy"
 else
@@ -87,11 +87,11 @@ else
 fi
 
 echo "Running: fallback_daemon_crash"
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" >/dev/null 2>&1 || true
+"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1 || true
 pid=$(cat "$DAEMON_PID_FILE" 2>/dev/null || echo "")
 kill -9 "$pid" 2>/dev/null || true
 sleep 0.5
-output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT 1" 2>&1)
+output=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT 1" 2>&1)
 if echo "$output" | grep -q "1"; then
 	log_pass "fallback_daemon_crash"
 else
@@ -101,7 +101,7 @@ fi
 echo "Running: fallback_connection_refused"
 cleanup_daemon
 touch "$DAEMON_SOCKET"
-output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT 1" 2>&1)
+output=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT 1" 2>&1)
 if echo "$output" | grep -q "1"; then
 	log_pass "fallback_connection_refused"
 else

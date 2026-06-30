@@ -78,9 +78,9 @@ daemon_query() {
 		opts=("${@:1:$#-1}")
 	fi
 	if [[ ${#opts[@]} -gt 0 ]]; then
-		"$QUERY_RUNNER" -t sqlite -d "$TEST_DB" "${opts[@]}" -q "$sql" 2>/dev/null
+		"$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" "${opts[@]}" -q "$sql" 2>/dev/null
 	else
-		"$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "$sql" 2>/dev/null
+		"$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "$sql" 2>/dev/null
 	fi
 }
 
@@ -98,7 +98,7 @@ daemon_send() {
 
 setup() {
 	cleanup_daemon
-	"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" >/dev/null 2>&1 || true
+	"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1 || true
 	wait_for_daemon 15
 }
 
@@ -114,7 +114,7 @@ echo "=== Daemon Lifecycle Tests ==="
 
 echo "Running: daemon_start_fresh"
 cleanup_daemon
-if "$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" >/dev/null 2>&1; then
+if "$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1; then
 	if wait_for_daemon 10; then
 		log_pass "daemon_start_fresh"
 	else
@@ -148,7 +148,7 @@ else
 fi
 
 echo "Running: daemon_stop"
-if "$QUERY_RUNNER" --daemon-stop -t sqlite -d "$TEST_DB" 2>/dev/null; then
+if "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" --daemon-stop -t sqlite -d "$TEST_DB" 2>/dev/null; then
 	sleep 1
 	if [[ ! -S "$DAEMON_SOCKET" ]] && [[ ! -f "$DAEMON_PORT_FILE" ]]; then
 		log_pass "daemon_stop"
@@ -161,7 +161,7 @@ fi
 
 echo "Running: daemon_stop_not_running"
 cleanup_daemon
-if "$QUERY_RUNNER" --daemon-stop -t sqlite -d "$TEST_DB" 2>/dev/null; then
+if "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" --daemon-stop -t sqlite -d "$TEST_DB" 2>/dev/null; then
 	log_pass "daemon_stop_not_running"
 else
 	log_fail "daemon_stop_not_running - should not fail"
@@ -169,11 +169,11 @@ fi
 
 echo "Running: daemon_restart"
 cleanup_daemon
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" >/dev/null 2>&1
+"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1
 wait_for_daemon 10
 first_pid=$(cat "$DAEMON_PID_FILE" 2>/dev/null || echo "")
 sleep 2
-if "$QUERY_RUNNER" --daemon-restart -t sqlite -d "$TEST_DB" 2>/dev/null; then
+if "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" --daemon-restart -t sqlite -d "$TEST_DB" 2>/dev/null; then
 	wait_for_daemon 10
 	second_pid=$(cat "$DAEMON_PID_FILE" 2>/dev/null || echo "")
 	if [[ -n "$second_pid" ]] && [[ "$first_pid" != "$second_pid" ]]; then
@@ -204,7 +204,7 @@ fi
 echo "Running: daemon_socket_cleanup"
 cleanup_daemon
 touch "$DAEMON_SOCKET" 2>/dev/null || true
-if "$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" >/dev/null 2>&1; then
+if "$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1; then
 	if wait_for_daemon 10; then
 		log_pass "daemon_socket_cleanup"
 	else

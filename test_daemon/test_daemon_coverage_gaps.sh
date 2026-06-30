@@ -72,7 +72,7 @@ echo "=== Coverage Gap Tests ==="
 echo ""
 echo "Running: daemon_env_daemon_mode_auto"
 cleanup_daemon
-DAEMON_MODE=auto output=$(echo "SELECT 1" | DAEMON_MODE=auto "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" 2>&1)
+DAEMON_MODE=auto output=$(echo "SELECT 1" | DAEMON_MODE=auto "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" 2>&1)
 if echo "$output" | grep -q "1"; then
     log_pass "daemon_env_daemon_mode_auto"
 else
@@ -81,7 +81,7 @@ fi
 
 echo "Running: daemon_env_daemon_mode_off"
 cleanup_daemon
-DAEMON_MODE=off output=$(echo "SELECT 1" | DAEMON_MODE=off "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" 2>&1)
+DAEMON_MODE=off output=$(echo "SELECT 1" | DAEMON_MODE=off "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" 2>&1)
 if echo "$output" | grep -q "1"; then
     log_pass "daemon_env_daemon_mode_off"
 else
@@ -90,7 +90,7 @@ fi
 
 echo "Running: daemon_flag_enable"
 cleanup_daemon
-output=$(echo "SELECT 1" | "$QUERY_RUNNER" --daemon -t sqlite -d "$TEST_DB" 2>&1)
+output=$(echo "SELECT 1" | "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" --daemon -t sqlite -d "$TEST_DB" 2>&1)
 if echo "$output" | grep -q "1"; then
     log_pass "daemon_flag_enable"
 else
@@ -108,9 +108,9 @@ fi
 
 echo "Running: daemon_status_endpoint_info"
 cleanup_daemon
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" > /dev/null 2>&1
+"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
-output=$("$QUERY_RUNNER" --daemon-status -t sqlite -d "$TEST_DB" 2>&1 || true)
+output=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" --daemon-status -t sqlite -d "$TEST_DB" 2>&1 || true)
 if echo "$output" | grep -qE "(UNIX|INET|localhost|PID)"; then
     log_pass "daemon_status_endpoint_info"
 else
@@ -120,7 +120,7 @@ fi
 echo "Running: daemon_stale_pid_file"
 cleanup_daemon
 echo "999999" > "$DAEMON_PID_FILE"
-output=$("$QUERY_RUNNER" --daemon-status -t sqlite -d "$TEST_DB" 2>&1 || true)
+output=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" --daemon-status -t sqlite -d "$TEST_DB" 2>&1 || true)
 if echo "$output" | grep -q "not running"; then
     log_pass "daemon_stale_pid_file"
 else
@@ -129,11 +129,11 @@ fi
 
 echo "Running: daemon_query_timeout"
 cleanup_daemon
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" > /dev/null 2>&1
+"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
 # Use the wrapper instead of raw nc — the wrapper transparently picks
 # the daemon's transport (Unix socket if available, INET otherwise).
-output=$(timeout 5 "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -f text -q "SELECT 1" 2>/dev/null || echo "timeout")
+output=$(timeout 5 "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -f text -q "SELECT 1" 2>/dev/null || echo "timeout")
 if echo "$output" | grep -q "1"; then
     log_pass "daemon_query_timeout"
 else
@@ -141,7 +141,7 @@ else
 fi
 echo "Running: daemon_graceful_shutdown_pending"
 cleanup_daemon
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" > /dev/null 2>&1
+"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
 port=$(cat "$DAEMON_PORT_FILE" 2>/dev/null || echo "")
 (echo '{"type":"shutdown"}' | timeout 2 nc localhost "$port" 2>/dev/null) &
@@ -156,7 +156,7 @@ fi
 
 echo "Running: daemon_format_json_valid"
 cleanup_daemon
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" > /dev/null 2>&1
+"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
 output=$(echo "SELECT 1" | "$QUERY_RUNNER" -f json -t sqlite -d "$TEST_DB" 2>&1)
 if echo "$output" | jq -e . >/dev/null 2>&1; then
@@ -167,7 +167,7 @@ fi
 
 echo "Running: daemon_format_csv_valid"
 cleanup_daemon
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" > /dev/null 2>&1
+"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
 output=$(echo "SELECT 1" | "$QUERY_RUNNER" -f csv -t sqlite -d "$TEST_DB" 2>&1)
 if echo "$output" | grep -q "1"; then
@@ -178,7 +178,7 @@ fi
 
 echo "Running: daemon_format_pretty_valid"
 cleanup_daemon
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" > /dev/null 2>&1
+"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
 output=$(echo "SELECT 1" | "$QUERY_RUNNER" -f pretty -t sqlite -d "$TEST_DB" 2>&1)
 if echo "$output" | grep -qE "(\+|-|1)"; then
@@ -189,7 +189,7 @@ fi
 
 echo "Running: daemon_format_text_valid"
 cleanup_daemon
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" > /dev/null 2>&1
+"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
 output=$(echo "SELECT 1" | "$QUERY_RUNNER" -f text -t sqlite -d "$TEST_DB" 2>&1)
 if echo "$output" | grep -q "1"; then
@@ -211,9 +211,9 @@ fi
 
 echo "Running: daemon_query_empty_result"
 cleanup_daemon
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" > /dev/null 2>&1
+"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
-output=$(echo "SELECT 1 WHERE 0" | "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" 2>&1)
+output=$(echo "SELECT 1 WHERE 0" | "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" 2>&1)
 if echo "$output" | grep -q "1"; then
     log_pass "daemon_query_empty_result"
 else
@@ -222,11 +222,11 @@ fi
 
 echo "Running: daemon_status_query"
 cleanup_daemon
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" > /dev/null 2>&1
+"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
 # Use the wrapper's --daemon-status which talks to the daemon
 # transport-agnostically (Unix socket if available, INET otherwise).
-response=$("$QUERY_RUNNER" --daemon-status -t sqlite -d "$TEST_DB" 2>/dev/null || echo "")
+response=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" --daemon-status -t sqlite -d "$TEST_DB" 2>/dev/null || echo "")
 if echo "$response" | grep -q '"status":"ok"'; then
     log_pass "daemon_status_query"
 else
@@ -234,7 +234,7 @@ else
 fi
 echo "Running: daemon_concurrent_different_formats"
 cleanup_daemon
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" > /dev/null 2>&1
+"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
 pids=()
 for fmt in json csv text; do
@@ -263,10 +263,10 @@ if [[ $TESTS_FAILED -eq 0 ]]; then exit 0; else exit 1; fi
 echo ""
 echo "Running: daemon_query_very_long"
 cleanup_daemon
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" > /dev/null 2>&1
+"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
 long_query="SELECT '$(head -c 1000 /dev/zero | tr '\0' 'a')' as long_val"
-output=$(echo "$long_query" | "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" 2>&1)
+output=$(echo "$long_query" | "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" 2>&1)
 if echo "$output" | grep -q "long_val"; then
     log_pass "daemon_query_very_long"
 else
@@ -275,10 +275,10 @@ fi
 
 echo "Running: daemon_query_special_chars"
 cleanup_daemon
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" > /dev/null 2>&1
+"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
 special_query="SELECT '\$&@#!%^*(){}[]|\\\"'\''\t\n\r' as special"
-output=$(echo "$special_query" | "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" 2>&1)
+output=$(echo "$special_query" | "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" 2>&1)
 if echo "$output" | grep -q "special"; then
     log_pass "daemon_query_special_chars"
 else
@@ -287,9 +287,9 @@ fi
 
 echo "Running: daemon_mixed_case_sql"
 cleanup_daemon
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" > /dev/null 2>&1
+"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
-output=$(echo "select count(*) from users" | "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" 2>&1)
+output=$(echo "select count(*) from users" | "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" 2>&1)
 if echo "$output" | grep -q "[0-9]"; then
     log_pass "daemon_mixed_case_sql"
 else
@@ -298,9 +298,9 @@ fi
 
 echo "Running: daemon_whitespace_query"
 cleanup_daemon
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" > /dev/null 2>&1
+"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
-output=$(echo "  SELECT 1  " | "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" 2>&1)
+output=$(echo "  SELECT 1  " | "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" 2>&1)
 if echo "$output" | grep -q "1"; then
     log_pass "daemon_whitespace_query"
 else
@@ -309,9 +309,9 @@ fi
 
 echo "Running: daemon_quoted_string_query"
 cleanup_daemon
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" > /dev/null 2>&1
+"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
-output=$(echo "SELECT 'hello world' as greeting" | "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" 2>&1)
+output=$(echo "SELECT 'hello world' as greeting" | "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" 2>&1)
 if echo "$output" | grep -q "hello world"; then
     log_pass "daemon_quoted_string_query"
 else
@@ -320,9 +320,9 @@ fi
 
 echo "Running: daemon_double_quote_string"
 cleanup_daemon
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" > /dev/null 2>&1
+"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
-output=$(echo 'SELECT "double quotes" as dq' | "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" 2>&1)
+output=$(echo 'SELECT "double quotes" as dq' | "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" 2>&1)
 if echo "$output" | grep -q "double quotes"; then
     log_pass "daemon_double_quote_string"
 else
@@ -331,9 +331,9 @@ fi
 
 echo "Running: daemon_number_values"
 cleanup_daemon
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" > /dev/null 2>&1
+"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
-output=$(echo "SELECT 42 as num, 3.14159 as pi, -100 as neg" | "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" 2>&1)
+output=$(echo "SELECT 42 as num, 3.14159 as pi, -100 as neg" | "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" 2>&1)
 if echo "$output" | grep -q "42" && echo "$output" | grep -q "3.14"; then
     log_pass "daemon_number_values"
 else
@@ -342,9 +342,9 @@ fi
 
 echo "Running: daemon_boolean_values"
 cleanup_daemon
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" > /dev/null 2>&1
+"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
-output=$(echo "SELECT 1 as one, 0 as zero" | "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" 2>&1)
+output=$(echo "SELECT 1 as one, 0 as zero" | "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" 2>&1)
 if echo "$output" | grep -q "1" && echo "$output" | grep -q "0"; then
     log_pass "daemon_boolean_values"
 else

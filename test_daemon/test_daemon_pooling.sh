@@ -7,6 +7,7 @@ QUERY_RUNNER="$SCRIPT_DIR/../query_runner"
 TEST_DB="$SCRIPT_DIR/test_daemon.db"
 DAEMON_SOCKET="$HOME/.query_runner/daemon.sock"
 DAEMON_PID_FILE="$HOME/.query_runner/daemon.pid"
+DAEMON_PORT_FILE="$HOME/.query_runner/daemon.port"
 DAEMON_CLASS_DIR="$HOME/.query_runner/daemon_class"
 
 RED='\033[0;31m'
@@ -44,7 +45,7 @@ cleanup_daemon() {
 
 setup() {
 	cleanup_daemon
-	"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" "SELECT 1" >/dev/null 2>&1 || true
+	"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1 || true
 	for i in 1 2 3 4 5 6 7 8 9 10; do
 		if [[ -S "$DAEMON_SOCKET" ]] || [[ -f "$DAEMON_PORT_FILE" ]]; then return 0; fi
 		sleep 0.5
@@ -70,7 +71,7 @@ echo "Running: pool_connection_reuse"
 # the pool, not eagerly created and abandoned.
 response=$(echo '{"type":"status"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
 if echo "$response" | grep -q 'idle_connections'; then
-	"$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1
+	"$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1
 	response=$(echo '{"type":"status"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
 	idle2=$(echo "$response" | grep -o '"idle_connections":[0-9]*' | grep -o '[0-9]*' || echo "0")
 	if [[ "$idle2" -ge 1 ]]; then
@@ -86,7 +87,7 @@ echo "Running: pool_max_connections"
 pids=()
 for i in {1..15}; do
 	(
-		output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT $i" 2>/dev/null)
+		output=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT $i" 2>/dev/null)
 		if [[ -n "$output" ]]; then
 			exit 0
 		else
@@ -114,13 +115,13 @@ else
 fi
 
 echo "Running: pool_query_uses_pool"
-first_time=$({ time "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1; } 2>&1)
-second_time=$({ time "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1; } 2>&1)
+first_time=$({ time "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1; } 2>&1)
+second_time=$({ time "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1; } 2>&1)
 log_pass "pool_query_uses_pool"
 
 echo "Running: pool_multiple_queries_same_connection"
 for i in {1..5}; do
-	output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT COUNT(*) FROM users" 2>/dev/null)
+	output=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT COUNT(*) FROM users" 2>/dev/null)
 	if ! echo "$output" | grep -q "[0-9]"; then
 		log_fail "pool_multiple_queries_same_connection"
 		break
@@ -132,7 +133,7 @@ fi
 
 echo "Running: pool_sequential_queries"
 for i in {1..10}; do
-	output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT $i as val" 2>/dev/null)
+	output=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT $i as val" 2>/dev/null)
 	if ! echo "$output" | grep -q "$i"; then
 		log_fail "pool_sequential_queries - query $i failed"
 		break
