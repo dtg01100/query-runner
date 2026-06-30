@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QUERY_RUNNER="$SCRIPT_DIR/../query_runner"
 TEST_DB="$SCRIPT_DIR/test_daemon.db"
+source "$(dirname "${BASH_SOURCE[0]}")/.test_setup.sh"
 DAEMON_SOCKET="$HOME/.query_runner/daemon.sock"
 DAEMON_PORT_FILE="$HOME/.query_runner/daemon.port"
 DAEMON_PID_FILE="$HOME/.query_runner/daemon.pid"

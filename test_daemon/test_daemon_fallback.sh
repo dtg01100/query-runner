@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QUERY_RUNNER="$SCRIPT_DIR/../query_runner"
 TEST_DB="$SCRIPT_DIR/test_daemon.db"
+source "$(dirname "${BASH_SOURCE[0]}")/.test_setup.sh"
 DAEMON_SOCKET="$HOME/.query_runner/daemon.sock"
 DAEMON_PID_FILE="$HOME/.query_runner/daemon.pid"
 DAEMON_CLASS_DIR="$HOME/.query_runner/daemon_class"
@@ -58,7 +59,7 @@ echo "=== Daemon Fallback Tests ==="
 
 echo "Running: fallback_socket_missing"
 cleanup_daemon
-output=$("$QUERY_RUNNER" --no-daemon -t sqlite -d "$TEST_DB" -q "SELECT 1" 2>&1)
+output=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" --no-daemon -t sqlite -d "$TEST_DB" -q "SELECT 1" 2>&1)
 if echo "$output" | grep -q "1"; then
 	log_pass "fallback_socket_missing"
 else
@@ -79,7 +80,7 @@ fi
 
 echo "Running: fallback_explicit_flag"
 cleanup_daemon
-output=$("$QUERY_RUNNER" --no-daemon -t sqlite -d "$TEST_DB" -q "SELECT 1 as val" 2>&1)
+output=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" --no-daemon -t sqlite -d "$TEST_DB" -q "SELECT 1 as val" 2>&1)
 if [[ -S "$DAEMON_SOCKET" ]]; then
 	log_fail "fallback_explicit_flag - daemon should not start"
 else

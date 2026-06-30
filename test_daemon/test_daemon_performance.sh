@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QUERY_RUNNER="$SCRIPT_DIR/../query_runner"
 TEST_DB="$SCRIPT_DIR/test_daemon.db"
+source "$(dirname "${BASH_SOURCE[0]}")/.test_setup.sh"
 DAEMON_SOCKET="$HOME/.query_runner/daemon.sock"
 DAEMON_PORT_FILE="$HOME/.query_runner/daemon.port"
 DAEMON_PID_FILE="$HOME/.query_runner/daemon.pid"
@@ -84,7 +85,7 @@ echo "=== Performance Tests ==="
 
 echo "Running: perf_daemon_startup"
 start=$(date +%s%3N)
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1
+"$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" --daemon-start -t sqlite -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1
 
 end=$(date +%s%3N)
 duration=$((end - start))
@@ -98,7 +99,7 @@ sleep 1
 
 echo "Running: perf_first_query"
 start=$(date +%s%3N)
-output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT 1" 2>/dev/null)
+output=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT 1" 2>/dev/null)
 
 end=$(date +%s%3N)
 duration=$((end - start))
@@ -113,7 +114,7 @@ echo "Running: perf_subsequent_queries"
 total_time=0
 for i in {1..10}; do
 	start=$(date +%s%3N)
-	output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT 1 as val" 2>/dev/null)
+	output=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT 1 as val" 2>/dev/null)
 
 	end=$(date +%s%3N)
 	total_time=$((total_time + (end - start)))
@@ -132,7 +133,7 @@ rm -rf "$HOME/.query_runner/cache" 2>/dev/null || true
 sleep 1
 
 start=$(date +%s%3N)
-output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT 1" 2>/dev/null)
+output=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT 1" 2>/dev/null)
 
 end=$(date +%s%3N)
 cold_time=$((end - start))
@@ -141,10 +142,10 @@ cold_time=$((end - start))
 sleep 1
 
 start=$(date +%s%3N)
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1
+"$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" --daemon-start -t sqlite -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1
 sleep 1
 start=$(date +%s%3N)
-output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT 1" 2>/dev/null)
+output=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT 1" 2>/dev/null)
 
 end=$(date +%s%3N)
 warm_time=$((end - start))
@@ -162,14 +163,14 @@ else
 fi
 
 echo "Running: perf_throughput"
-"$QUERY_RUNNER" --daemon-stop -t sqlite -d "$TEST_DB" >/dev/null 2>&1 || true
-"$QUERY_RUNNER" --daemon-start -t sqlite -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1 || true
+"$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" --daemon-stop -t sqlite -d "$TEST_DB" >/dev/null 2>&1 || true
+"$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" --daemon-start -t sqlite -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1 || true
 
 sleep 1
 
 start=$(date +%s%3N)
 for i in {1..50}; do
-	"$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1
+	"$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1
 
 done
 end=$(date +%s%3N)
@@ -208,7 +209,7 @@ for i in 1 2 3 4 5; do
 	if [[ -n "$port" ]]; then
 		echo '{"type":"query","sql":"SELECT 1","format":"json"}' | timeout 2 nc -w 1 localhost "$port" >/dev/null 2>&1 || true
 	else
-		"$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1 || true
+		"$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1 || true
 	fi
 done
 latencies=()
@@ -217,7 +218,7 @@ for i in {1..100}; do
 	if [[ -n "$port" ]]; then
 		output=$(echo '{"type":"query","sql":"SELECT 1 as val","format":"json"}' | timeout 2 nc -w 1 localhost "$port" 2>/dev/null)
 	else
-		output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -q "SELECT 1 as val" 2>/dev/null)
+		output=$("$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT 1 as val" 2>/dev/null)
 	fi
 
 	end=$(date +%s%3N)

@@ -15,6 +15,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+# harness's own tallies (sum of per-suite counters parsed from sub-suite output).
 TESTS_PASSED=0
 TESTS_FAILED=0
 TESTS_SKIPPED=0
@@ -28,6 +29,13 @@ setup_test_db() {
 cleanup_daemon() {
 	if [[ -S "$DAEMON_SOCKET" ]]; then
 		echo '{"type":"shutdown"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" 2>/dev/null || true
+	fi
+	if [[ -f "$DAEMON_PORT_FILE" ]]; then
+		local port
+		port=$(cat "$DAEMON_PORT_FILE" 2>/dev/null || echo "")
+		if [[ -n "$port" ]]; then
+			echo '{"type":"shutdown"}' | timeout 2 nc localhost "$port" 2>/dev/null || true
+		fi
 	fi
 	if [[ -f "$DAEMON_PID_FILE" ]]; then
 		local pid
@@ -47,6 +55,16 @@ cleanup() {
 }
 
 trap cleanup EXIT
+
+# Each sub-suite prints '=== <Name> Test Results ===' followed by 'Passed: N'
+# and 'Failed: M'. Tally those into the harness counters so the harness's
+# final report matches what actually happened in the sub-suites.
+tally_sub_suite() {
+	local pass_line="$1"
+	local fail_line="$2"
+	TESTS_PASSED=$((TESTS_PASSED + ${pass_line##*: }))
+	TESTS_FAILED=$((TESTS_FAILED + ${fail_line##*: }))
+}
 
 log_pass() {
 	echo -e "${GREEN}✓${NC} $1"
@@ -75,62 +93,80 @@ check_socat() {
 	fi
 }
 
+# Run a sub-suite, capturing its 'Passed: N' / 'Failed: M' summary lines
+# so we can roll them into our outer counters.
+run_sub_suite() {
+	local script="$1"
+	local output rc
+	output=$(bash "$script" 2>&1) || rc=$?
+	rc=${rc:-0}
+	echo "$output"
+	# Tally from the suite's 'Passed:' / 'Failed:' lines.
+	local p f
+	p=$(echo "$output" | grep -E '^[A-Z].*Passed:[[:space:]]+[0-9]+' | tail -1 | grep -oE '[0-9]+$' || echo 0)
+	f=$(echo "$output" | grep -E 'Failed:[[:space:]]+[0-9]+' | tail -1 | grep -oE '[0-9]+$' || echo 0)
+	TESTS_PASSED=$((TESTS_PASSED + ${p:-0}))
+	TESTS_FAILED=$((TESTS_FAILED + ${f:-0}))
+	return $rc
+}
+
 check_socat
 
 setup_test_db
 
 # Each sub-suite has its own pass/fail counters and prints its own summary.
-# We propagate the exit code so a failing suite is observable from CI / the
-# top-level run_all_tests.sh. set -e is intentionally NOT enabled (see
-# top-of-file): we want to run all suites even when the first one fails.
+# We use run_sub_suite which propagates the exit code AND tallies counts so
+# the final summary at the bottom accurately reflects what ran. set -e is
+# intentionally NOT enabled (see top-of-file): we want to run all suites
+# even when the first one fails.
 SUITE_RC=0
 
 if [[ "${1:-all}" == "lifecycle" ]] || [[ "${1:-all}" == "all" ]]; then
 	echo ""
 	echo "=== Running Lifecycle Tests ==="
-	bash "$SCRIPT_DIR/test_daemon_lifecycle.sh" || SUITE_RC=1
+	run_sub_suite "$SCRIPT_DIR/test_daemon_lifecycle.sh" || SUITE_RC=1
 fi
 
 if [[ "${1:-all}" == "protocol" ]] || [[ "${1:-all}" == "all" ]]; then
 	echo ""
 	echo "=== Running Protocol Tests ==="
-	bash "$SCRIPT_DIR/test_daemon_protocol.sh" || SUITE_RC=1
+	run_sub_suite "$SCRIPT_DIR/test_daemon_protocol.sh" || SUITE_RC=1
 fi
 
 if [[ "${1:-all}" == "fallback" ]] || [[ "${1:-all}" == "all" ]]; then
 	echo ""
 	echo "=== Running Fallback Tests ==="
-	bash "$SCRIPT_DIR/test_daemon_fallback.sh" || SUITE_RC=1
+	run_sub_suite "$SCRIPT_DIR/test_daemon_fallback.sh" || SUITE_RC=1
 fi
 
 if [[ "${1:-all}" == "pooling" ]] || [[ "${1:-all}" == "all" ]]; then
 	echo ""
 	echo "=== Running Pooling Tests ==="
-	bash "$SCRIPT_DIR/test_daemon_pooling.sh" || SUITE_RC=1
+	run_sub_suite "$SCRIPT_DIR/test_daemon_pooling.sh" || SUITE_RC=1
 fi
 
 if [[ "${1:-all}" == "security" ]] || [[ "${1:-all}" == "all" ]]; then
 	echo ""
 	echo "=== Running Security Tests ==="
-	bash "$SCRIPT_DIR/test_daemon_security.sh" || SUITE_RC=1
+	run_sub_suite "$SCRIPT_DIR/test_daemon_security.sh" || SUITE_RC=1
 fi
 
 if [[ "${1:-all}" == "concurrency" ]] || [[ "${1:-all}" == "all" ]]; then
 	echo ""
 	echo "=== Running Concurrency Tests ==="
-	bash "$SCRIPT_DIR/test_daemon_concurrency.sh" || SUITE_RC=1
+	run_sub_suite "$SCRIPT_DIR/test_daemon_concurrency.sh" || SUITE_RC=1
 fi
 
 if [[ "${1:-all}" == "performance" ]] || [[ "${1:-all}" == "all" ]]; then
 	echo ""
 	echo "=== Running Performance Tests ==="
-	bash "$SCRIPT_DIR/test_daemon_performance.sh" || SUITE_RC=1
+	run_sub_suite "$SCRIPT_DIR/test_daemon_performance.sh" || SUITE_RC=1
 fi
 
 if [[ "${1:-all}" == "coverage" ]] || [[ "${1:-all}" == "all" ]]; then
 	echo ""
 	echo "=== Running Coverage Gap Tests ==="
-	bash "$SCRIPT_DIR/test_daemon_coverage_gaps.sh" || SUITE_RC=1
+	run_sub_suite "$SCRIPT_DIR/test_daemon_coverage_gaps.sh" || SUITE_RC=1
 fi
 
 echo ""

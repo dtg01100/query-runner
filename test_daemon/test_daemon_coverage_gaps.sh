@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QUERY_RUNNER="$SCRIPT_DIR/../query_runner"
 TEST_DB="$SCRIPT_DIR/test_daemon.db"
+source "$(dirname "${BASH_SOURCE[0]}")/.test_setup.sh"
 DAEMON_SOCKET="$HOME/.query_runner/daemon.sock"
 DAEMON_PORT_FILE="$HOME/.query_runner/daemon.port"
 DAEMON_PID_FILE="$HOME/.query_runner/daemon.pid"
@@ -99,7 +100,7 @@ fi
 
 echo "Running: daemon_flag_disable"
 cleanup_daemon
-output=$(echo "SELECT 1" | "$QUERY_RUNNER" --no-daemon -t sqlite -d "$TEST_DB" 2>&1)
+output=$(echo "SELECT 1" | "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" --no-daemon -t sqlite -d "$TEST_DB" 2>&1)
 if echo "$output" | grep -q "1"; then
     log_pass "daemon_flag_disable"
 else
@@ -158,7 +159,7 @@ echo "Running: daemon_format_json_valid"
 cleanup_daemon
 "$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
-output=$(echo "SELECT 1" | "$QUERY_RUNNER" -f json -t sqlite -d "$TEST_DB" 2>&1)
+output=$(echo "SELECT 1" | "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -f json -t sqlite -d "$TEST_DB" 2>&1)
 if echo "$output" | jq -e . >/dev/null 2>&1; then
     log_pass "daemon_format_json_valid"
 else
@@ -169,7 +170,7 @@ echo "Running: daemon_format_csv_valid"
 cleanup_daemon
 "$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
-output=$(echo "SELECT 1" | "$QUERY_RUNNER" -f csv -t sqlite -d "$TEST_DB" 2>&1)
+output=$(echo "SELECT 1" | "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -f csv -t sqlite -d "$TEST_DB" 2>&1)
 if echo "$output" | grep -q "1"; then
     log_pass "daemon_format_csv_valid"
 else
@@ -180,7 +181,7 @@ echo "Running: daemon_format_pretty_valid"
 cleanup_daemon
 "$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
-output=$(echo "SELECT 1" | "$QUERY_RUNNER" -f pretty -t sqlite -d "$TEST_DB" 2>&1)
+output=$(echo "SELECT 1" | "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -f pretty -t sqlite -d "$TEST_DB" 2>&1)
 if echo "$output" | grep -qE "(\+|-|1)"; then
     log_pass "daemon_format_pretty_valid"
 else
@@ -191,7 +192,7 @@ echo "Running: daemon_format_text_valid"
 cleanup_daemon
 "$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" > /dev/null 2>&1
 wait_for_daemon 10
-output=$(echo "SELECT 1" | "$QUERY_RUNNER" -f text -t sqlite -d "$TEST_DB" 2>&1)
+output=$(echo "SELECT 1" | "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -f text -t sqlite -d "$TEST_DB" 2>&1)
 if echo "$output" | grep -q "1"; then
     log_pass "daemon_format_text_valid"
 else
@@ -201,7 +202,7 @@ fi
 echo "Running: daemon_symlink_invocation"
 cleanup_daemon
 ln -sf "$QUERY_RUNNER" /tmp/qr_symlink_test 2>/dev/null || true
-output=$(echo "SELECT 1" | /tmp/qr_symlink_test --daemon -t sqlite -d "$TEST_DB" 2>&1)
+output=$(echo "SELECT 1" | /tmp/qr_symlink_test --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" 2>&1)
 rm -f /tmp/qr_symlink_test 2>/dev/null || true
 if echo "$output" | grep -q "1"; then
     log_pass "daemon_symlink_invocation"
@@ -239,7 +240,7 @@ wait_for_daemon 10
 pids=()
 for fmt in json csv text; do
     (
-        output=$(echo "SELECT '$fmt' as fmt" | "$QUERY_RUNNER" -f "$fmt" -t sqlite -d "$TEST_DB" 2>/dev/null)
+        output=$(echo "SELECT '$fmt' as fmt" | "$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -f "$fmt" -t sqlite -d "$TEST_DB" 2>/dev/null)
         exit 0
     ) &
     pids+=($!)
