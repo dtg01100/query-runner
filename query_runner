@@ -441,7 +441,13 @@ download_standalone_jdk() {
 }
 
 get_classpath_cache_key() {
-    # Generate cache key based on drivers directory: file count, paths, and timestamps
+    # Generate cache key based on db_type and drivers directory state.
+    # The cache must be per-db_type: each database driver has its own
+    # classpath, and reusing a stale one (e.g. the db2 classpath during a
+    # sqlite test) produces 'No suitable driver found' failures. Key
+    # components: db_type + drivers dir file count + per-jar path+mtime.
+    local db_type
+    db_type=$(detect_database_type)
     local drivers_info=""
     if [[ -d "$DRIVERS_DIR" ]]; then
         local jar_count
@@ -449,7 +455,7 @@ get_classpath_cache_key() {
         drivers_info=$(find "$DRIVERS_DIR" -name "*.jar" -type f -printf "%p|%T@\n" 2>/dev/null | sort | md5sum | cut -d' ' -f1)
         drivers_info="${jar_count}_${drivers_info}"
     fi
-    echo "classpath_${drivers_info}"
+    echo "classpath_${db_type}_${drivers_info}"
 }
 
 get_cached_classpath() {
