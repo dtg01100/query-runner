@@ -49,7 +49,7 @@ log_perf() {
 
 cleanup_daemon() {
 	if [[ -S "$DAEMON_SOCKET" ]]; then
-		echo '{"type":"shutdown"}' | timeout 2 socat - UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || true
+		echo '{"type":"shutdown"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" 2>/dev/null || true
 	fi
 	if [[ -f "$DAEMON_PID_FILE" ]]; then
 		local pid
