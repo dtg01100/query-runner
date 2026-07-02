@@ -314,10 +314,12 @@ test_utility_options() {
     
     # Test --test-connection (will fail without proper config)
     output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" --test-connection 2>&1 || true)
-    if echo "$output" | grep -qiE "(connection|success|failed|driver)"; then
-        log_pass "--test-connection produces output"
+    if echo "$output" | grep -qiE "connection (successful|failed)"; then
+        log_pass "--test-connection reports definitive status"
+    elif echo "$output" | grep -qiE "(SQL0104|invalid SQL syntax)"; then
+        log_fail "--test-connection returned SQL syntax error" "$output"
     else
-        log_pass "--test-connection executed"
+        log_fail "--test-connection produced no recognizable status" "$output"
     fi
     
     # Test --help

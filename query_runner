@@ -904,10 +904,12 @@ check_read_only() {
         exit 1
     fi
 
-    # Query must start with a read-only operation
-    if [[ ! "$normalized_query" =~ ^[[:space:]]*(select|with|show|describe|explain|pragma)[[:space:]] ]]; then
+    # Query must start with a read-only operation.
+    # VALUES is a DB2/Postgres-compatible no-FROM constant expression; included
+    # so test_connection() can probe with `VALUES 1` portably.
+    if [[ ! "$normalized_query" =~ ^[[:space:]]*(select|with|values|show|describe|explain|pragma)[[:space:]] ]]; then
         echo "Error: Query must start with a read-only operation" >&2
-        echo "Supported operations: SELECT, WITH, SHOW, DESCRIBE, EXPLAIN, PRAGMA" >&2
+        echo "Supported operations: SELECT, WITH, VALUES, SHOW, DESCRIBE, EXPLAIN, PRAGMA" >&2
         echo "Example: SELECT * FROM users WHERE id = 1" >&2
         exit 1
     fi
@@ -1400,7 +1402,9 @@ download_driver() {
 }
 
 test_connection() {
-    local test_query="SELECT 1"
+    # VALUES 1 is portable across DB2 (AS/400), PostgreSQL, H2, and modern SQLite.
+    # Bare "SELECT 1" is rejected by DB2 with SQL0104 (no FROM clause allowed).
+    local test_query="VALUES 1"
     execute_query "$test_query" "text" > /dev/null
     echo "Connection successful!" >&2
 }
