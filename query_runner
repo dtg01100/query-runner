@@ -468,9 +468,8 @@ get_cached_classpath() {
         current_key=$(get_classpath_cache_key)
         if [[ "$cache_key" == "$current_key" ]]; then
             debug "Using cached classpath file: $cache_file"
-            # IMPORTANT: do NOT re-append $jar_file here. The cached classpath was
-            # already constructed as "$jar_file:$libs" in build_classpath; appending
-            # $jar_file again caused it to appear 2-3 times in the daemon's -cp.
+            # The cached classpath already contains the full "jar1:jar2:..."
+            # string from build_classpath; do not prepend any extra path here.
             cat "$cache_file"
             return 0
         fi
@@ -487,7 +486,6 @@ save_classpath_cache() {
 }
 
 build_classpath() {
-    local jar_file="$1"
     local cache_key
     cache_key=$(get_classpath_cache_key)
 
@@ -495,17 +493,16 @@ build_classpath() {
     local cached_classpath
     if cached_classpath=$(get_cached_classpath "$cache_key"); then
         debug "Using cached classpath: $cached_classpath"
-        # The cached classpath is the full "$jar_file:$libs" string. Re-appending
-        # $jar_file here caused jars to be duplicated in the daemon's -cp.
+        # Cached classpath stores "jar1:jar2:..." (one entry per matching JAR).
+        # An earlier revision re-prepended the caller's $jar_file here, which
+        # caused jars to appear 2-3 times in the daemon's -cp.
         echo "$cached_classpath"
         return 0
     fi
 
-    # Build classpath from scratch with lazy loading
-    # Note: do NOT initialize with $jar_file — the per-driver loops below add every
-    # matching jar. The previous "classpath=$jar_file" init caused 3.42.0.0.jar to
-    # appear twice in the classpath (once from init, once from the loop). Start empty
-    # and let the loops add a leading colon, then strip it before returning.
+    # Build classpath from scratch with lazy loading. The per-driver loops
+    # below add every matching jar; start empty and let them append a
+    # leading colon, then strip it before returning.
     local classpath=""
     local db_type
     db_type=$(detect_database_type)
@@ -639,7 +636,7 @@ Options:
                             systemd service unit, not for direct use.
      -q, --query QUERY        SQL query to execute (instead of reading from file or stdin)
      --version              Show version information
-     -h, --help              Show this help message
+    -?, --help              Show this help message
     --                      End of options; next argument is interpreted as the query file (even if it starts with '-').
 
 Examples:
@@ -1968,6 +1965,12 @@ while [[ $# -gt 0 ]]; do
             CLI_PARAMS_FILE="$(validate_cli_option "params-file" "$2")"
             shift 2
             ;;
+        -v|--verbose)
+            CLI_VERBOSE=1
+            CLI_DEBUG=1
+            DEBUG=1
+            shift
+            ;;
         --debug)
             CLI_DEBUG=1
             DEBUG=1
@@ -2005,7 +2008,7 @@ while [[ $# -gt 0 ]]; do
             DAEMON_ACTION="systemd"
             shift
             ;;
-        --help)
+        -\?|--help)
             usage
             ;;
         --version)
