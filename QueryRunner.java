@@ -48,13 +48,16 @@ public class QueryRunner {
     private static String sanitizeOutput(String str) {
         if (str == null) return null;
         int len = str.length();
-        // Fast path: scan for any char that would be stripped. Most AS/400 values
-        // are plain ASCII (item codes, vendor numbers, names) and skip the copy.
+        // Defense-in-depth for untrusted output downstream (terminal/CSV/HTML).
+        // Strips only chars that survive per-format escaping AND are real injection
+        // risks: control chars (incl. NUL), angle brackets (HTML/markdown), backslash
+        // (shell escape carry-over), backtick, dollar, pipe (shell metacharacters).
+        // Notably: ', ", &, ; are kept so AS/400 vendor names and notes round-trip.
         boolean needsStrip = false;
         for (int i = 0; i < len; i++) {
             char c = str.charAt(i);
-            if (c < 0x20 || c == '<' || c == '>' || c == '"' || c == '\''
-                || c == '&' || c == '`' || c == '$' || c == '|' || c == ';') {
+            if (c < 0x20 || c == '<' || c == '>' || c == '\\' || c == '`'
+                || c == '$' || c == '|') {
                 needsStrip = true;
                 break;
             }
@@ -63,8 +66,8 @@ public class QueryRunner {
         StringBuilder sb = new StringBuilder(len);
         for (int i = 0; i < len; i++) {
             char c = str.charAt(i);
-            if (c >= 0x20 && c != '<' && c != '>' && c != '"' && c != '\''
-                && c != '&' && c != '`' && c != '$' && c != '|' && c != ';') {
+            if (c >= 0x20 && c != '<' && c != '>' && c != '\\' && c != '`'
+                && c != '$' && c != '|') {
                 sb.append(c);
             }
         }
