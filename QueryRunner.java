@@ -15,6 +15,14 @@ public class QueryRunner {
         return v != null && (v.equals("1") || v.equalsIgnoreCase("true"));
     }
 
+    // Suppress WARN lines on stderr when the wrapper (or the env) sets
+    // QUERY_RUNNER_NO_WARNINGS=1 (mirrors the bash --quiet / --no-warnings
+    // decision). Errors still print.
+    private static boolean isWarningsSuppressed() {
+        String v = System.getenv("QUERY_RUNNER_NO_WARNINGS");
+        return v != null && (v.equals("1") || v.equalsIgnoreCase("true"));
+    }
+
     private static void debug(String msg) {
         if (isDebug()) System.err.println("DEBUG: " + msg);
     }
@@ -244,13 +252,15 @@ public class QueryRunner {
             if (isDebug()) {
                 e.printStackTrace(System.err);
             }
-            System.exit(1);
+            // Stable exit code for SQL errors so callers can branch on it.
+            // 4 matches the bash wrapper's EXIT_SQL constant.
+            System.exit(4);
         } catch (Exception e) {
             System.err.println("Error: " + sanitizeOutput(e.getMessage() != null ? e.getMessage() : "An error occurred"));
             if (isDebug()) {
                 e.printStackTrace(System.err);
             }
-            System.exit(1);
+            System.exit(4);
         }
     }
 
@@ -284,8 +294,8 @@ public class QueryRunner {
                     rows.add(row);
                     rowCount++;
                 }
-                if (rowCount >= MAX_ROWS) {
-                    System.err.println("Warning: Result set truncated at " + MAX_ROWS + " rows for security");
+                if (rowCount >= MAX_ROWS && !isWarningsSuppressed()) {
+                    System.err.println("WARN: Result set truncated at " + MAX_ROWS + " rows for security");
                 }
                 outputPretty(columnNames, rows);
                 break;
@@ -309,11 +319,26 @@ public class QueryRunner {
         for (int i = 0; i < colCount; i++) {
             keyPrefixes[i] = "\"" + JsonUtil.escapeJson(columnNames.get(i)) + "\":";
         }
-        
+
+        // When the wrapper sets QUERY_RUNNER_JSON_ENVELOPE=1, wrap the array
+        // in a metadata envelope so agents can detect truncation, row
+        // counts, and per-call timing without re-parsing the array. The
+        // bare-array form remains the default for backward compatibility.
+        boolean envelope = "1".equals(System.getenv("QUERY_RUNNER_JSON_ENVELOPE"));
+        int rowCount = 0;
+        boolean truncated = false;
+
         StringBuilder sb = new StringBuilder(8192);
+        if (envelope) {
+            sb.append("{\"status\":\"ok\",\"row_count\":");
+        }
         sb.append('[');
         boolean first = true;
         while (rs.next()) {
+            if (rowCount >= MAX_ROWS) {
+                truncated = true;
+                break;
+            }
             if (!first) sb.append(',');
             first = false;
             sb.append('{');
@@ -332,9 +357,24 @@ public class QueryRunner {
                 }
             }
             sb.append('}');
+            rowCount++;
         }
         sb.append(']');
+        if (envelope) {
+            sb.append(",\"truncated\":").append(truncated ? "true" : "false");
+            sb.append(",\"columns\":[");
+            for (int i = 0; i < colCount; i++) {
+                if (i > 0) sb.append(',');
+                sb.append('"').append(JsonUtil.escapeJson(columnNames.get(i))).append('"');
+            }
+            sb.append("]}");
+        }
         System.out.print(sb.toString());
+        if (truncated && !isWarningsSuppressed()) {
+            // Stable, greppable prefix on stderr. Suppressed when the wrapper
+            // exports QUERY_RUNNER_NO_WARNINGS=1 (--quiet / --no-warnings).
+            System.err.println("WARN: Result set truncated at " + MAX_ROWS + " rows for security");
+        }
     }
 
     private static void outputCsvStream(List<String> columnNames, ResultSet rs) throws SQLException {

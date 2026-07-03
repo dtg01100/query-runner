@@ -17,8 +17,24 @@ QUERY_RUNNER_DEBUG="${QUERY_RUNNER_DEBUG:-0}"
 # Ensure DAEMON_MODE has a default early to avoid unbound variable errors
 DAEMON_MODE="${DAEMON_MODE:-auto}"
 
+# Toggle stderr noise (warnings, debug). CLI/env can override.
+QUERY_RUNNER_NO_WARNINGS="${QUERY_RUNNER_NO_WARNINGS:-0}"
+CLI_QUIET=0
+
 # Version
 QUERY_RUNNER_VERSION="1.0"
+
+# Stable exit codes for programmatic callers.
+#   0 ok (EXIT_OK)
+#   2 driver/config/connection failure (EXIT_CONFIG)
+#   3 read-only / safety rejection (EXIT_SAFETY)
+#   4 SQL error (EXIT_SQL — emitted by QueryRunner.java's System.exit(4))
+# Exported so callers reading `man`/docs can rely on the values; consumed
+# internally by the safety/config checks below.
+export EXIT_OK=0
+export EXIT_CONFIG=2
+export EXIT_SAFETY=3
+export EXIT_SQL=4
 
 # Cache management functions
 init_cache() {
@@ -55,8 +71,17 @@ get_cache_dir_for_key() {
 # Debug helper: echo messages only when DEBUG is enabled
 debug() {
     local debug_val="${DEBUG:-$QUERY_RUNNER_DEBUG}"
-    if [[ "$debug_val" != "0" && "$debug_val" != "false" ]]; then
+    if [[ "$debug_val" != "0" && "$debug_val" != "false" ]] && [[ "$CLI_QUIET" -eq 0 ]]; then
         echo "DEBUG: $*" >&2
+    fi
+}
+
+# Warning helper: stderr, suppressed by --quiet / --no-warnings /
+# QUERY_RUNNER_NO_WARNINGS. Always uses a stable "WARN: " prefix so
+# downstream tools (e.g. `grep WARN:`) can filter reliably.
+warn() {
+    if [[ "$CLI_QUIET" -eq 0 && "$QUERY_RUNNER_NO_WARNINGS" != "1" && "$QUERY_RUNNER_NO_WARNINGS" != "true" ]]; then
+        echo "WARN: $*" >&2
     fi
 }
 
@@ -606,43 +631,52 @@ Execute read-only SQL queries using JDBC with autoconfiguration.
 Arguments:
     QUERY_FILE    Optional path to file containing SQL query.
                   If not provided, reads query from stdin.
+                  Use '-' to explicitly read from stdin.
 
 Options:
-    -f, --format FORMAT     Output format: text, csv, json, pretty
-    -t, --type TYPE         Database type: mysql, postgresql, oracle, sqlserver,
-                           db2, h2, sqlite (auto-detect if not specified)
-    -h, --host HOST         Database host (overrides .env)
-    -p, --port PORT         Database port (overrides .env)
-    -d, --database DATABASE Database name (overrides .env)
-    -u, --user USER         Database user (overrides .env)
-    -P, --password PASSWORD Database password (overrides .env)
-    --param VALUE           Bind a query parameter for ? placeholders (repeatable)
-    --params JSON           JSON array of parameter values for placeholders
-    --params-file FILE      File containing a JSON array of parameter values
--e, --env-file FILE     Custom environment file (default: .env)
-     --drivers-dir DIR       JDBC drivers directory (default: ./drivers)
-     --list-drivers          List available database drivers and exit
-     --test-connection       Test database connection and exit
-     -v, --verbose           Enable verbose debug output (same as QUERY_RUNNER_DEBUG=1)
-     --debug                 Alias for --verbose
-     --download-driver TYPE  Download JDBC driver for TYPE (mysql, postgresql, h2, sqlite, sqlserver)
-      --daemon               Enable daemon mode (auto-start if not running)
-      --no-daemon            Disable daemon mode, use single-query
-      --daemon-start         Start the daemon process
-      --daemon-stop          Stop the daemon process
-      --daemon-restart       Restart the daemon process
-     --daemon-status        Check daemon status
-     --daemon-systemd       Run the daemon in foreground. Invoked by the
-                            systemd service unit, not for direct use.
-     -q, --query QUERY        SQL query to execute (instead of reading from file or stdin)
-     --version              Show version information
-    -?, --help              Show this help message
-    --                      End of options; next argument is interpreted as the query file (even if it starts with '-').
+    -f, --format FORMAT         Output format: text, csv, json, pretty (default: text)
+                                With -f json, pass --json-envelope for a metadata
+                                wrapper (status/row_count/truncated/columns/data).
+    -t, --type TYPE             Database type: mysql, postgresql, oracle, sqlserver,
+                                db2, h2, sqlite (auto-detect if not specified)
+    -h, --host HOST             Database host (overrides .env)
+    -p, --port PORT             Database port (overrides .env)
+    -d, --database DATABASE     Database name (overrides .env)
+    -u, --user USER             Database user (overrides .env)
+    -P, --password PASSWORD     Database password (overrides .env)
+    -q, --query QUERY           SQL query to execute (instead of reading from file or stdin)
+    --param VALUE               Bind a query parameter for ? placeholders (repeatable)
+    --params JSON               JSON array of parameter values for placeholders
+    --params-file FILE          File containing a JSON array of parameter values
+    --allow-union-tables LIST   Comma-separated whitelist for UNION tables
+    -e, --env-file FILE         Custom environment file (default: .env)
+    --drivers-dir DIR           JDBC drivers directory (default: ./drivers)
+    --json-envelope             Wrap -f json output in {status, row_count, truncated,
+                                columns, data} for easier agent consumption.
+    --quiet                     Suppress WARN and DEBUG messages on stderr.
+    --no-warnings               Suppress only WARN messages (same as QUERY_RUNNER_NO_WARNINGS=1).
+    --list-drivers              List available database drivers and exit
+    --test-connection           Test database connection and exit
+    --download-driver TYPE      Download JDBC driver for TYPE (mysql, postgresql,
+                                h2, sqlite, sqlserver, db2)
+    --daemon                    Enable daemon mode (auto-start if not running)
+    --no-daemon                 Disable daemon mode, use single-query
+    --daemon-start              Start the daemon process
+    --daemon-stop               Stop the daemon process
+    --daemon-restart            Restart the daemon process
+    --daemon-status             Check daemon status
+    --daemon-systemd            Run the daemon in foreground (systemd only)
+    -v, --verbose               Enable verbose debug output (same as QUERY_RUNNER_DEBUG=1)
+    --debug                     Alias for --verbose
+    --version                   Show version information
+    -?, --help                  Show this help message
+    --                          End of options; next argument is treated as the query file
+                                (use this when the filename starts with '-').
 
 Examples:
     echo "SELECT * FROM users LIMIT 10" | $(basename "$0")
     $(basename "$0") -t mysql query.sql
-    $(basename "$0") -f json --host localhost --port 5432 -t postgresql query.sql
+    $(basename "$0") -f json --json-envelope --host localhost --port 5432 -t postgresql query.sql
     $(basename "$0") -q "SELECT * FROM users LIMIT 10"
     $(basename "$0") -q "SELECT * FROM users WHERE id = ?" --param 1
     $(basename "$0") --test-connection
@@ -655,15 +689,18 @@ Daemon Mode: Enabled by default. Use --no-daemon to force single-query mode.
     Autoconfigures based on DB_TYPE.
     Supported types: mysql, postgresql, oracle, sqlserver, db2, h2, sqlite
 
+Exit codes:
+    0  Success
+    2  Driver/config/connection failure
+    3  Query rejected by read-only/safety check
+    4  SQL execution error
+
 Environment variables:
     QUERY_RUNNER_DAEMON_IDLE_SECS  Seconds the daemon stays warm with no activity
                                    before self-shutdown. Default: 120.
-                                   Set to 0 to disable auto-shutdown (daemon
-                                   runs until --daemon-stop). 120s is long
-                                   enough to keep the daemon warm across a
-                                   price-lookup batch and short enough to
-                                   release resources when you're done.
+                                   Set to 0 to disable auto-shutdown.
     QUERY_RUNNER_DEBUG=1           Verbose debug output (same as --verbose)
+    QUERY_RUNNER_NO_WARNINGS=1     Suppress WARN messages on stderr (same as --no-warnings)
     QUERY_RUNNER_NO_COLOR=1        Disable color output
     QUERY_RUNNER_NO_PROGRESS=1     Disable progress indicators
 EOF
@@ -775,20 +812,20 @@ check_union_safety() {
                 echo "  2. UNION in WITH clauses (CTEs)" >&2
                 echo "  3. --allow-union-tables=table1,table2 flag for trusted tables" >&2
                 echo "  4. Ensure all tables in the UNION are explicitly whitelisted" >&2
-                exit 1
+                exit "$EXIT_SAFETY"
             fi
         fi
 
         # Check for complex subquery patterns that might be trying to bypass detection
         if [[ "$normalized_query" =~ \([[:space:]]*select.*union ]] || [[ "$normalized_query" =~ select.*\(.*union ]]; then
             debug "Complex subquery with UNION detected, performing additional validation"
-            
+
             # Count the number of UNION occurrences
             local union_count
             union_count=$(echo "$normalized_query" | grep -o "union" | wc -l)
             if [[ $union_count -gt 1 ]]; then
                 echo "Error: Multiple UNION operations detected - this is not allowed for security reasons." >&2
-                exit 1
+                exit "$EXIT_SAFETY"
             fi
         fi
     fi
@@ -799,7 +836,7 @@ check_union_safety() {
     echo "  1. UNION ALL with the same table" >&2
     echo "  2. UNION in WITH clauses (CTEs)" >&2
     echo "  3. --allow-union-tables=table1,table2 flag for trusted tables" >&2
-    exit 1
+    exit "$EXIT_SAFETY"
 }
 
 # Enhanced query normalization with better error handling
@@ -887,28 +924,28 @@ check_read_only() {
             if [[ "$pattern" == "union " ]]; then
                 check_union_safety "$query"
             else
-                echo "Error: Only read-only queries are allowed. Detected potentially dangerous pattern: $pattern" >&2
+                echo "Error (exit $EXIT_SAFETY): Only read-only queries are allowed. Detected potentially dangerous pattern: $pattern" >&2
                 echo "Please use only SELECT, WITH, SHOW, DESCRIBE, EXPLAIN, or PRAGMA statements." >&2
-                exit 1
+                exit "$EXIT_SAFETY"
             fi
         fi
     done
 
     # Check for multiple statements (semicolon separation)
     if [[ "$normalized_query" == *";"* ]]; then
-        echo "Error: Multiple SQL statements are not allowed" >&2
+        echo "Error (exit $EXIT_SAFETY): Multiple SQL statements are not allowed" >&2
         echo "Each query must be a single SQL statement without semicolons." >&2
-        exit 1
+        exit "$EXIT_SAFETY"
     fi
 
     # Query must start with a read-only operation.
     # VALUES is a DB2/Postgres-compatible no-FROM constant expression; included
     # so test_connection() can probe with `VALUES 1` portably.
     if [[ ! "$normalized_query" =~ ^[[:space:]]*(select|with|values|show|describe|explain|pragma)[[:space:]] ]]; then
-        echo "Error: Query must start with a read-only operation" >&2
+        echo "Error (exit $EXIT_SAFETY): Query must start with a read-only operation" >&2
         echo "Supported operations: SELECT, WITH, VALUES, SHOW, DESCRIBE, EXPLAIN, PRAGMA" >&2
         echo "Example: SELECT * FROM users WHERE id = 1" >&2
-        exit 1
+        exit "$EXIT_SAFETY"
     fi
 }
 
@@ -1280,7 +1317,7 @@ find_driver_jar() {
     if [[ ${#jar_files[@]} -eq 0 ]]; then
         # Attempt to auto-download common drivers for missing cases (e.g., jt400 for AS/400/DB2)
         if echo "$driver_pattern" | grep -qi "jt400\|jt400*.jar\|db2jcc"; then
-            echo "Warning: JDBC driver not found for pattern '$driver_pattern'. Attempting to download jt400 driver..." >&2
+            warn "JDBC driver not found for pattern '$driver_pattern'. Attempting to download jt400 driver..."
             if download_driver db2; then
                 # Retry search after download
                 jar_files=()
@@ -1295,7 +1332,7 @@ find_driver_jar() {
                     jar_files+=("$jar")
                 done < <(find "$SCRIPT_DIR" -name "*.jar" -type f -print0 2>/dev/null)
             else
-                echo "Warning: Automatic download of jt400 driver failed or was skipped." >&2
+                warn "Automatic download of jt400 driver failed or was skipped."
             fi
         fi
     fi
@@ -1402,8 +1439,28 @@ test_connection() {
     # VALUES 1 is portable across DB2 (AS/400), PostgreSQL, H2, and modern SQLite.
     # Bare "SELECT 1" is rejected by DB2 with SQL0104 (no FROM clause allowed).
     local test_query="VALUES 1"
-    execute_query "$test_query" "text" > /dev/null
-    echo "Connection successful!" >&2
+    # When stdout is not a TTY (e.g. an agent invoking --test-connection as a
+    # health check), emit a single JSON status line so callers don't have to
+    # parse the human "Connection successful!" stderr message.
+    if [[ ! -t 1 ]]; then
+        local rc=0
+        if ! execute_query "$test_query" "text" >/dev/null 2>&1; then
+            rc=$?
+        fi
+        if [[ $rc -eq 0 ]]; then
+            echo '{"status":"ok","probe":"VALUES 1"}'
+        else
+            echo "{\"status\":\"error\",\"exit_code\":$rc}"
+            return $rc
+        fi
+    else
+        if execute_query "$test_query" "text" >/dev/null 2>&1; then
+            echo "Connection successful!" >&2
+        else
+            echo "Connection failed." >&2
+            return "$EXIT_CONFIG"
+        fi
+    fi
 }
 
 load_env() {
@@ -1421,7 +1478,7 @@ load_env() {
     fi
     
     if [[ ! -f "$env_file_to_use" ]]; then
-        echo "Warning: Environment file not found at $env_file_to_use" >&2
+        warn "Environment file not found at $env_file_to_use"
         echo "You can specify connection details via command line options" >&2
     else
         # Secure environment file parsing
@@ -1632,7 +1689,7 @@ execute_query() {
             echo "Error: Failed to compile Java code" >&2
             echo "Compilation error details:" >&2
             echo "$javac_output" >&2
-            exit 1
+            exit "$EXIT_CONFIG"
     fi
     # Save to cache for future use
     save_to_cache "$cache_key" "$compilation_dir"
@@ -1644,6 +1701,21 @@ local classpath
     export OUTPUT_FORMAT="$format" JDBC_URL JDBC_DRIVER_CLASS DB_USER DB_PASSWORD SQL_PARAMS
     # Pass DEBUG to Java process as QUERY_RUNNER_DEBUG env var so the Java runner can also print debug info
     export QUERY_RUNNER_DEBUG="${DEBUG:-${QUERY_RUNNER_DEBUG:-0}}"
+    # Mirror the bash-side --quiet / --no-warnings decision into the JVM so
+    # the Java runner's WARN output (truncation, etc.) respects the same
+    # suppression flags.
+    if [[ "$CLI_QUIET" -eq 1 || "$QUERY_RUNNER_NO_WARNINGS" == "1" || "$QUERY_RUNNER_NO_WARNINGS" == "true" ]]; then
+        export QUERY_RUNNER_NO_WARNINGS=1
+    else
+        unset QUERY_RUNNER_NO_WARNINGS
+    fi
+    # When --json-envelope is set, tell the Java runner to wrap -f json output
+    # in a metadata envelope. Stays off by default for backward compatibility.
+    if [[ "${CLI_JSON_ENVELOPE:-0}" == "1" ]]; then
+        export QUERY_RUNNER_JSON_ENVELOPE=1
+    else
+        unset QUERY_RUNNER_JSON_ENVELOPE
+    fi
     echo -n "$query" | "$JAVA_BIN" --enable-native-access=ALL-UNNAMED -cp "$classpath:$compilation_dir" QueryRunner
     debug "Running java: $JAVA_BIN -cp $classpath:$compilation_dir QueryRunner"
 }
@@ -1818,6 +1890,7 @@ CLI_ENV_FILE=""
 CLI_PARAM_VALUES=()
 CLI_PARAMS_JSON=""
 CLI_PARAMS_FILE=""
+CLI_JSON_ENVELOPE=0
 ALLOW_UNION_TABLES=""
 DOWNLOAD_DRIVER=""
 DAEMON_ACTION=""
@@ -1974,6 +2047,18 @@ while [[ $# -gt 0 ]]; do
         --debug)
             CLI_DEBUG=1
             DEBUG=1
+            shift
+            ;;
+        --quiet)
+            CLI_QUIET=1
+            shift
+            ;;
+        --no-warnings)
+            QUERY_RUNNER_NO_WARNINGS=1
+            shift
+            ;;
+        --json-envelope)
+            CLI_JSON_ENVELOPE=1
             shift
             ;;
         --daemon)

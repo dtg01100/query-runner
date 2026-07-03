@@ -1,12 +1,3 @@
-What verbose mode shows:
-
-- Detection and configuration details (database type, driver's jar, classpath)
-- Whether a precompiled QueryRunner.class or cached compiled class is used
-- Java compilation invocation and cache operations
-- Java runtime invocation (classpath used)
-- Full SQL exception stack traces when errors occur
-
-Note: Debug/verbose mode will NOT print sensitive data such as DB passwords. The JDBC URL is masked in debug output if it contains a password parameter.
 # Generic Query Runner
 
 A universal JDBC query runner that auto-configures for multiple database types with support for various output formats.
@@ -157,22 +148,32 @@ echo "SELECT * FROM users LIMIT 10" | ./query_runner
 Usage: ./query_runner [OPTIONS] [QUERY_FILE]
 
 Options:
-  -f, --format FORMAT        Output format: text, csv, json, pretty (default: text)
-  -t, --type TYPE            Database type: mysql, postgresql, oracle, sqlserver, db2, h2, sqlite
-  -h, --host HOST            Database host (overrides .env)
-  -p, --port PORT            Database port (overrides .env)
-  -d, --database DATABASE    Database name (overrides .env)
-  -u, --user USER            Database user (overrides .env)
-  -P, --password PASSWORD    Database password (overrides .env)
-  --param VALUE              Bind a query parameter for ? placeholders (repeatable)
-  --params JSON              JSON array of parameter values for placeholders
-  --params-file FILE         File containing a JSON array of parameter values
-  -e, --env-file FILE        Custom environment file (default: .env)
-  --drivers-dir DIR          Directory containing JDBC drivers (default: ./drivers)
-  --allow-union-tables TABLES Comma-separated list of tables allowed in UNION queries
-  --list-drivers             List available database drivers and exit
-  --test-connection          Test database connection and exit
-  --help                     Show this help message
+  -f, --format FORMAT         Output format: text, csv, json, pretty (default: text)
+  -t, --type TYPE             Database type: mysql, postgresql, oracle, sqlserver, db2, h2, sqlite
+  -h, --host HOST             Database host (overrides .env)
+  -p, --port PORT             Database port (overrides .env)
+  -d, --database DATABASE     Database name (overrides .env)
+  -u, --user USER             Database user (overrides .env)
+  -P, --password PASSWORD     Database password (overrides .env)
+  -q, --query QUERY           SQL query to execute (instead of reading from file or stdin)
+  --param VALUE               Bind a query parameter for ? placeholders (repeatable)
+  --params JSON               JSON array of parameter values for placeholders
+  --params-file FILE          File containing a JSON array of parameter values
+  --allow-union-tables LIST   Comma-separated whitelist for UNION tables
+  -e, --env-file FILE         Custom environment file (default: .env)
+  --drivers-dir DIR           Directory containing JDBC drivers (default: ./drivers)
+  --json-envelope             Wrap -f json output in a metadata envelope
+  --quiet                     Suppress WARN and DEBUG on stderr
+  --no-warnings               Suppress only WARN messages
+  --list-drivers              List available database drivers and exit
+  --test-connection           Test database connection and exit
+  --download-driver TYPE      Download JDBC driver for TYPE
+  --daemon / --no-daemon      Enable / disable daemon mode
+  --daemon-start / -stop / -restart / -status  Manage the daemon
+  -v, --verbose               Verbose debug output (same as QUERY_RUNNER_DEBUG=1)
+  --debug                     Alias for --verbose
+  --version                   Show version information
+  -?, --help                  Show this help message
 ```
 
 ### Advanced Usage
@@ -219,12 +220,12 @@ echo "SELECT id, value FROM test WHERE id = ?" | ./query_runner -t sqlite -d "$T
 
 ```bash
 ./query_runner -e production.env query.sql
+```
 
 Note: If your query file starts with a hyphen ("-something.sql"), pass a `--` sentinel first to stop option parsing:
 
 ```bash
 ./query_runner -- -weird-filename.sql
-```
 ```
 
 ## Output Formats
@@ -436,6 +437,7 @@ Set environment variable for verbose output:
 ```bash
 export QUERY_RUNNER_DEBUG=1
 ./query_runner query.sql
+```
 
 Alternatively, you can enable verbose output using the CLI flags:
 
@@ -458,7 +460,52 @@ What verbose mode shows:
 - Full SQL exception stack traces when errors occur
 
 Note: Debug/verbose mode will NOT print sensitive data such as DB passwords. The JDBC URL is masked in debug output if it contains a password parameter.
+
+### Quiet Mode
+
+```bash
+# Suppress WARN and DEBUG on stderr
+./query_runner --quiet -q "SELECT 1"
+
+# Or set the env var
+QUERY_RUNNER_NO_WARNINGS=1 ./query_runner -q "SELECT 1"
 ```
+
+### Structured JSON Output (for Agents)
+
+Use `--json-envelope` to wrap `-f json` output in a metadata envelope:
+
+```bash
+./query_runner --json-envelope -f json -q "SELECT id FROM users LIMIT 3"
+# {"status":"ok","row_count":3,"truncated":false,"columns":["id"],"data":[{"id":1},...]}
+```
+
+Fields:
+
+- `status`: `"ok"` on success
+- `row_count`: number of rows actually returned
+- `truncated`: `true` when the result set hit the 10k-row safety cap
+- `columns`: column names from the result set
+- `data`: the row array
+
+`--test-connection` emits a single JSON status line on non-TTY stdout:
+
+```bash
+./query_runner --test-connection
+# (when stdout is piped)
+# {"status":"ok","probe":"VALUES 1"}
+```
+
+### Exit Codes
+
+The wrapper returns stable exit codes so agents can branch without parsing strings:
+
+| Code | Meaning                                              |
+|------|------------------------------------------------------|
+| 0    | Success                                              |
+| 2    | Driver / config / connection failure                 |
+| 3    | Query rejected by read-only / safety check           |
+| 4    | SQL execution error (bad SQL, missing table, etc.)   |
 
 ### Connection Timeout
 
