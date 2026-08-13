@@ -4,7 +4,7 @@ import java.util.regex.*;
 
 public class QueryRunner {
 
-    private static final int MAX_ROWS = 10000;
+    private static final int MAX_ROWS = 1000000;
     private static final int MAX_VALUE_LENGTH = 10000;
 
     // Pre-compiled pattern for number detection (avoids regex compilation per value)
@@ -240,9 +240,13 @@ public class QueryRunner {
                 } else if (errorMessage.contains("table") && errorMessage.contains("not found")) {
                     System.err.println("Query execution failed: Table not found");
                     System.err.println("Please check your table names and database schema.");
-                } else if (errorMessage.contains("syntax") || errorMessage.contains("SQL")) {
+                } else if (errorMessage.contains("syntax") || errorMessage.contains("SQL0104")) {
                     System.err.println("Query execution failed: Invalid SQL syntax");
                     System.err.println("Please check your SQL query for syntax errors.");
+                    // Always surface the real (sanitized) DB2 message — "SQLxxxx"
+                    // prefixes alone (SQL0206, SQL0205, ...) are NOT syntax errors
+                    // and were previously masked as "Invalid SQL syntax".
+                    System.err.println("Details: " + sanitizeOutput(errorMessage));
                 } else {
                     System.err.println("SQL Error: " + sanitizeOutput(errorMessage));
                     System.err.println("Please check your query and database connection.");

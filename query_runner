@@ -42,8 +42,14 @@ init_cache() {
 }
 
 get_source_hash() {
-    # Hash of the query_runner script itself
-    md5sum "$0" | cut -d' ' -f1
+    # Hash of the query_runner script itself PLUS the Java sources it compiles.
+    # (The Java sources were previously excluded, so edits to QueryRunner.java
+    # silently kept using the stale cached .class until the 24h cache expiry.)
+    local java_sources_hash=""
+    if [[ -d "$SCRIPT_DIR" ]]; then
+        java_sources_hash=$(md5sum "$SCRIPT_DIR"/QueryRunner.java "$SCRIPT_DIR"/JsonUtil.java 2>/dev/null | md5sum | cut -d' ' -f1)
+    fi
+    echo "$(md5sum "$0" | cut -d' ' -f1)_${java_sources_hash}"
 }
 
 get_drivers_hash() {
