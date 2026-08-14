@@ -2891,6 +2891,12 @@ public class QueryDaemon {
                 closeMethod.invoke(serverChannel);
             }
         } catch (Exception ignored) {}
+        // Remove the socket and PID files up front so clients see the
+        // daemon as gone immediately. The worker/scheduler await below may
+        // take up to 10s on a loaded machine, but a long-running in-flight
+        // request shouldn't make the daemon look stuck to new clients.
+        try { Files.deleteIfExists(Paths.get(SOCKET_PATH)); } catch (IOException ignored) {}
+        try { Files.deleteIfExists(Paths.get(PID_FILE)); } catch (IOException ignored) {}
         workerPool.shutdown();
         scheduler.shutdown();
         try {
@@ -2898,8 +2904,6 @@ public class QueryDaemon {
             scheduler.awaitTermination(5, TimeUnit.SECONDS);
         } catch (InterruptedException ignored) {}
         if (pool != null) pool.shutdown();
-        try { Files.deleteIfExists(Paths.get(SOCKET_PATH)); } catch (IOException ignored) {}
-        try { Files.deleteIfExists(Paths.get(PID_FILE)); } catch (IOException ignored) {}
     }
 
     private boolean isReadOnlyQuery(String sql) {

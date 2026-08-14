@@ -47,10 +47,16 @@ setup() {
 	cleanup_daemon
 	"$QUERY_RUNNER" --daemon-start --env-file "$SCRIPT_DIR/.env.test" -t sqlite  -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1 || true
 	# Poll for the socket instead of a fixed sleep: the daemon takes a few
-	# seconds to start on a cold cache, so a 1s sleep is racy (the first
-	# query that actually opens a DB connection can then miss the timeout).
+	# seconds to start on a cold cache, so a 1s sleep is racy.
 	for i in 1 2 3 4 5 6 7 8 9 10; do
-		if [[ -S "$DAEMON_SOCKET" ]]; then return 0; fi
+		if [[ -S "$DAEMON_SOCKET" ]]; then
+			# Warm up the connection pool: the first query that
+			# actually opens a DB connection pays the
+			# Class.forName + native-lib load cost, which easily
+			# exceeds the security tests' timeout 2 socat window.
+			"$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1 || true
+			return 0
+		fi
 		sleep 0.5
 	done
 	return 1

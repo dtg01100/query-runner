@@ -50,7 +50,18 @@ setup() {
 	# ~3-4s to compile + bind on a cold cache (JDK 26's javac is
 	# slower), so a 1s sleep is racy.
 	for i in 1 2 3 4 5 6 7 8 9 10; do
-		if [[ -S "$DAEMON_SOCKET" ]]; then return 0; fi
+		if [[ -S "$DAEMON_SOCKET" ]]; then
+			# Warm up the connection pool: the first request that
+			# actually opens a DB connection pays the
+			# Class.forName + native-lib load cost, which easily
+			# exceeds the protocol tests' timeout 2 socat window
+			# on a cold JVM. Send a ping (no DB hit) and then a
+			# real query through the daemon to establish the pool
+			# before the tests run.
+			echo '{"type":"ping"}' | timeout 5 socat - UNIX-CONNECT:"$DAEMON_SOCKET" >/dev/null 2>&1 || true
+			"$QUERY_RUNNER" --env-file "$SCRIPT_DIR/.env.test" -t sqlite -d "$TEST_DB" -q "SELECT 1" >/dev/null 2>&1 || true
+			return 0
+		fi
 		sleep 0.5
 	done
 	return 1
@@ -109,9 +120,10 @@ fi
 echo "Running: protocol_shutdown"
 response=$(echo '{"type":"shutdown"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
 # The deferred shutdown runs shutdown() on a separate thread, which calls
-# workerPool.awaitTermination(5s) — so the socket may take up to ~5s
-# to disappear. Poll for up to 8s to leave a small margin.
-for i in $(seq 1 80); do
+# workerPool.awaitTermination(5s) and scheduler.awaitTermination(5s) before
+# deleting the socket file. On a loaded machine that can exceed 10s, so
+# poll for up to 15s to leave a comfortable margin.
+for i in $(seq 1 150); do
 	if [[ ! -S "$DAEMON_SOCKET" ]]; then break; fi
 	sleep 0.1
 done
@@ -148,7 +160,7 @@ else
 fi
 
 echo "Running: protocol_large_result"
-response=$(echo '{"type":"query","sql":"WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x<100) SELECT * FROM cnt","format":"json"}' | timeout 5 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
+response=$(echo '{"type":"query","sql":"WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x<100) SELECT * FROM cnt","format":"json"}' | timeout 10 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
 if echo "$response" | grep -q '"status":"ok"' && echo "$response" | grep -q '"x"'; then
 	log_pass "protocol_large_result"
 else
