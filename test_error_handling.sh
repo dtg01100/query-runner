@@ -297,7 +297,9 @@ test_error_message_clarity() {
     # shorten the stress test so CI/local runs stay fast; allow overriding via QUERY_STRESS_ITERS
     iters=${QUERY_STRESS_ITERS:-20}
     long_query='SELECT 1 '
-    for ((_ = 1; _ <= iters; _++)); do
+    # NB: '_' is bash's last-argument special var (reassigned after every
+    # command), so using it as the loop counter here spun forever. Use 'i'.
+    for ((i = 1; i <= iters; i++)); do
         long_query+='UNION ALL SELECT 1 '
     done
     output=$(echo "$long_query" | "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" 2>&1 || true)

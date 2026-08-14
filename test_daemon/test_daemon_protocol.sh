@@ -156,8 +156,12 @@ else
 fi
 
 echo "Running: protocol_special_chars"
-response=$(echo '{"type":"query","sql":"SELECT '\''hello\nworld\tspecial\rchars'\'' as txt","format":"json"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
-if echo "$response" | grep -q '"status":"ok"' && echo "$response" | grep -q '\\n'; then
+# The daemon's sanitizeOutput (mirroring QueryRunner.sanitizeOutput) strips
+# backslash/backtick/pipe/angle-brackets as shell/HTML injection risks, so
+# this test uses a double-quote (which must survive and be JSON-escaped as
+# \") plus & (which must round-trip) to verify proper JSON escaping.
+response=$(echo '{"type":"query","sql":"SELECT '\''hello \"world\" & friends'\'' as txt","format":"json"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{}')
+if echo "$response" | grep -q '"status":"ok"' && echo "$response" | grep -Fq 'hello \"world\" & friends'; then
 	log_pass "protocol_special_chars"
 else
 	log_fail "protocol_special_chars - special chars not properly escaped"

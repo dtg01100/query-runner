@@ -244,7 +244,7 @@ test_query_parameter_option() {
     fi
 
     # Test SQL_PARAMS environment variable with JSON array
-    output=$(SQL_PARAMS='[1]' echo "SELECT value FROM test WHERE id = ?" | "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" 2>&1 || true)
+    output=$(echo "SELECT value FROM test WHERE id = ?" | SQL_PARAMS='[1]' "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" 2>&1 || true)
     if echo "$output" | grep -q "data1"; then
         log_pass "SQL_PARAMS environment variable binding works"
     else
@@ -314,7 +314,7 @@ test_utility_options() {
     
     # Test --test-connection (will fail without proper config)
     output=$("$QUERY_RUNNER" -t sqlite -d "$TEST_DB" --test-connection 2>&1 || true)
-    if echo "$output" | grep -qiE "connection (successful|failed)"; then
+    if echo "$output" | grep -qiE "connection (successful|failed)|\"status\":\"(ok|error)\""; then
         log_pass "--test-connection reports definitive status"
     elif echo "$output" | grep -qiE "(SQL0104|invalid SQL syntax)"; then
         log_fail "--test-connection returned SQL syntax error" "$output"

@@ -51,7 +51,7 @@ run_test() {
     
     # Run the command and capture output and exit code
     local output
-    local exit_code
+    local exit_code=0
     output=$(eval "$test_command" 2>&1) || exit_code=$?
     
     # Check if the test passed
@@ -80,7 +80,9 @@ run_test() {
 create_test_db() {
     echo "Creating test SQLite database..."
     
-    # Create database with test tables
+    # Drop any leftover DB from a previous run; otherwise the CREATE TABLE
+    # heredoc fails with "table already exists" and the suite aborts.
+    rm -f "$TEST_DB" 2>/dev/null || true
     sqlite3 "$TEST_DB" << 'EOF'
 CREATE TABLE users (
     id INTEGER PRIMARY KEY,
@@ -127,73 +129,78 @@ main() {
     create_test_db
     
     # Test 1: Valid SELECT query
+    # NB: queries are passed via -q (a bare positional arg is a query FILE,
+    # so a SQL string there used to fail as "file not found" and only the
+    # should_fail tests were passing by accident).
     run_test "Valid SELECT query" \
-        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f text 'SELECT * FROM users LIMIT 2'" \
+        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f text -q 'SELECT * FROM users LIMIT 2'" \
         "should_pass"
     
     # Test 2: SQL injection attempt with UNION
     run_test "SQL injection attempt with UNION" \
-        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f text 'SELECT * FROM users UNION SELECT * FROM products'" \
+        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f text -q 'SELECT * FROM users UNION SELECT * FROM products'" \
         "should_fail"
     
     # Test 3: INSERT statement (should be blocked)
     run_test "INSERT statement (should be blocked)" \
-        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f text 'INSERT INTO users (username, email) VALUES (\"test\", \"test@test.com\")'" \
+        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f text -q 'INSERT INTO users (username, email) VALUES (\"test\", \"test@test.com\")'" \
         "should_fail"
     
     # Test 4: UPDATE statement (should be blocked)
     run_test "UPDATE statement (should be blocked)" \
-        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f text 'UPDATE users SET email = \"hacker@evil.com\" WHERE username = \"alice\"'" \
+        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f text -q 'UPDATE users SET email = \"hacker@evil.com\" WHERE username = \"alice\"'" \
         "should_fail"
     
     # Test 5: DELETE statement (should be blocked)
     run_test "DELETE statement (should be blocked)" \
-        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f text 'DELETE FROM users WHERE username = \"alice\"'" \
+        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f text -q 'DELETE FROM users WHERE username = \"alice\"'" \
         "should_fail"
     
     # Test 6: DROP statement (should be blocked)
     run_test "DROP statement (should be blocked)" \
-        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f text 'DROP TABLE users'" \
+        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f text -q 'DROP TABLE users'" \
         "should_fail"
     
     # Test 7: Multiple statements (should be blocked)
     run_test "Multiple statements (should be blocked)" \
-        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f text 'SELECT * FROM users; DROP TABLE users'" \
+        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f text -q 'SELECT * FROM users; DROP TABLE users'" \
         "should_fail"
     
     # Test 8: Path traversal attempt in database path
     run_test "Path traversal attempt in database path" \
-        "$QUERY_RUNNER -t sqlite -d '../../../etc/passwd' -f text 'SELECT 1'" \
+        "$QUERY_RUNNER -t sqlite -d '../../../etc/passwd' -f text -q 'SELECT 1'" \
         "should_fail"
     
     # Test 9: Command injection in host parameter
     run_test "Command injection in host parameter" \
-        "$QUERY_RUNNER -t sqlite -h 'localhost; rm -rf /' -d '$TEST_DB' -f text 'SELECT 1'" \
+        "$QUERY_RUNNER -t sqlite -h 'localhost; rm -rf /' -d '$TEST_DB' -f text -q 'SELECT 1'" \
         "should_fail"
     
     # Test 10: Invalid format parameter
     run_test "Invalid format parameter" \
-        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f 'invalid_format' 'SELECT 1'" \
+        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f 'invalid_format' -q 'SELECT 1'" \
         "should_fail"
     
     # Test 11: Very long query (DoS attempt)
     run_test "Very long query (DoS attempt)" \
-        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f text 'SELECT * FROM users WHERE username = \"$(head -c 2000000 /dev/zero | tr '\0' 'a')\"'" \
+        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f text -q 'SELECT * FROM users WHERE username = \"$(head -c 2000000 /dev/zero | tr '\0' 'a')\"'" \
         "should_fail"
     
     # Test 12: Null byte injection
     run_test "Null byte injection" \
-        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f text $'SELECT * FROM users WHERE username = \"test\\0; DROP TABLE products\"'" \
+        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f text -q $'SELECT * FROM users WHERE username = \"test\\0; DROP TABLE products\"'" \
         "should_fail"
     
     # Test 13: Valid UNION with same table (should be allowed)
     run_test "Valid UNION with same table" \
-        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f text 'SELECT username FROM users WHERE id = 1 UNION ALL SELECT username FROM users WHERE id = 2'" \
+        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f text -q 'SELECT username FROM users WHERE id = 1 UNION ALL SELECT username FROM users WHERE id = 2'" \
         "should_pass"
     
-    # Test 14: Valid WITH clause with UNION (should be allowed)
+    # Test 14: Valid WITH clause with UNION (should be allowed). NB: UNION
+    # inside a CTE follows the same same-table rule as top-level UNION, so
+    # this must combine the SAME table.
     run_test "Valid WITH clause with UNION" \
-        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f text 'WITH cte AS (SELECT username FROM users UNION ALL SELECT name FROM products) SELECT * FROM cte'" \
+        "$QUERY_RUNNER -t sqlite -d '$TEST_DB' -f text -q 'WITH cte AS (SELECT username FROM users UNION ALL SELECT username FROM users WHERE id > 1) SELECT * FROM cte'" \
         "should_pass"
     
     # Test 15: Environment file with malicious content
@@ -205,7 +212,7 @@ DB_PASSWORD=test
 DB_DATABASE=/etc/passwd
 EOF
     run_test "Environment file with malicious content" \
-        "$QUERY_RUNNER --env-file /tmp/malicious.env -f text 'SELECT 1'" \
+        "$QUERY_RUNNER --env-file /tmp/malicious.env -f text -q 'SELECT 1'" \
         "should_fail"
     rm -f /tmp/malicious.env
     

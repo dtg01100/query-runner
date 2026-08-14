@@ -29,10 +29,15 @@ public class JsonUtil {
                 case '\r': sb.append("\\r"); break;
                 default:
                     if (c < ' ' || c > 127) {
-                        // Use hex string directly instead of String.format
-                        sb.append("\\u00");
-                        sb.append(Integer.toHexString(c >> 4 & 0xF));
-                        sb.append(Integer.toHexString(c & 0xF));
+                        // 4-digit hex escape: \u00e9 for \u00E9, \u4e2d for U+4E2D.
+                        // The previous code always emitted "\\u00" + 2 low hex
+                        // digits, corrupting any char above U+00FF (U+4E2D became
+                        // \\u002d, i.e. the character '-').
+                        sb.append("\\u");
+                        sb.append(hexDigit(c >> 12));
+                        sb.append(hexDigit(c >> 8));
+                        sb.append(hexDigit(c >> 4));
+                        sb.append(hexDigit(c));
                     } else {
                         sb.append(c);
                     }
@@ -45,5 +50,10 @@ public class JsonUtil {
     public static String escapeJsonEmpty(String str) {
         if (str == null) return "";
         return escapeJson(str);
+    }
+
+    private static char hexDigit(int nibble) {
+        int n = nibble & 0xF;
+        return (char) (n < 10 ? '0' + n : 'a' + n - 10);
     }
 }

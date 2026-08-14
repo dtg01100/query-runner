@@ -320,25 +320,31 @@ test_multiple_db_types_caching() {
         else
             log_pass "Multiple DB type test (skipped - only SQLite available)"
         fi
+    fi
+}
+
+# Test concurrent cache access
+test_cache_concurrent_access() {
+    echo "=== Testing Concurrent Cache Access ==="
+    
+    rm -rf "$CACHE_DIR"
+    
     # Run multiple queries in parallel
+    local pids=()
     for i in {1..5}; do
         (echo "SELECT * FROM test WHERE id = $i" | "$QUERY_RUNNER" -t sqlite -d "$TEST_DB" -f text >/dev/null 2>&1) &
+        pids+=("$!")
     done
     
     # Wait for all background queries and ensure they all succeeded
-    if ! wait; then
-        pids+=("$pid")
-    done
-    
-    # Wait for all background queries and ensure they all succeeded
-    wait_status=0
+    local wait_status=0
     for pid in "${pids[@]}"; do
         if ! wait "$pid"; then
             wait_status=1
         fi
     done
     
-    
+    if [[ $wait_status -ne 0 ]]; then
         log_fail "One or more concurrent cache queries failed"
         return
     fi

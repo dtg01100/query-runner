@@ -445,6 +445,13 @@ download_standalone_jdk() {
 
     if [[ ! -d "$java_dir" ]]; then
         echo "Error: Java is not found on your system." >&2
+        # Never block on an interactive prompt when stdin is a pipe (the
+        # standard way this tool is invoked): a bare read would consume the
+        # query piped in on stdin.
+        if [[ ! -t 0 ]]; then
+            echo "Install a JDK (java + javac) or run this command from an interactive terminal." >&2
+            exit 1
+        fi
         read -p "Do you want to download a standalone JDK? (y/n) " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -517,6 +524,10 @@ save_classpath_cache() {
 }
 
 build_classpath() {
+    # $1 is the explicitly-found driver jar (from find_driver_jar). It may live
+    # outside DRIVERS_DIR (e.g. SCRIPT_DIR), so ensure it lands on the returned
+    # classpath without duplicating an entry that is already in the list.
+    local explicit_jar="${1:-}"
     local cache_key
     cache_key=$(get_classpath_cache_key)
 
@@ -527,6 +538,9 @@ build_classpath() {
         # Cached classpath stores "jar1:jar2:..." (one entry per matching JAR).
         # An earlier revision re-prepended the caller's $jar_file here, which
         # caused jars to appear 2-3 times in the daemon's -cp.
+        if [[ -n "$explicit_jar" && "$cached_classpath" != *"$explicit_jar"* ]]; then
+            cached_classpath="$cached_classpath:$explicit_jar"
+        fi
         echo "$cached_classpath"
         return 0
     fi
@@ -596,6 +610,12 @@ build_classpath() {
 
     # Save to cache (post-strip, so the cache stores the canonical "jar1:jar2..." form).
     save_classpath_cache "$cache_key" "$classpath"
+
+    # Explicitly-found driver jar (possibly outside DRIVERS_DIR) goes on the
+    # returned classpath only; the cache entry stays canonical per-DRIVERS_DIR.
+    if [[ -n "$explicit_jar" && "$classpath" != *"$explicit_jar"* ]]; then
+        classpath="$classpath:$explicit_jar"
+    fi
 
     echo "$classpath"
 }
@@ -730,10 +750,13 @@ check_union_safety() {
     # 3. Explicitly allowed by user flag
     # 4. Subqueries that are clearly contained
 
-    # Check for UNION in CTE context (safe)
+    # UNION inside a CTE is subject to the SAME table rules as a top-level
+    # UNION (same table / whitelist only). An earlier revision returned 0 here
+    # for every CTE, which let any cross-table UNION bypass the safety check
+    # by wrapping it in a WITH clause. The generic detection below still fires
+    # because the query contains "union ... select".
     if [[ "$normalized_query" =~ with[[:space:]]+.*[[:space:]]+union[[:space:]]+(all[[:space:]]+)?select ]]; then
-        debug "Allowing UNION in CTE context"
-        return 0  # Allow UNION and UNION ALL in CTEs
+        debug "UNION in CTE context detected; applying same-table rules"
     fi
 
     # Check for UNION ALL (safer than UNION DISTINCT)
@@ -753,7 +776,15 @@ check_union_safety() {
     if [[ "$union_pattern_detected" == true ]]; then
         # Extract table names from the query for analysis
         local tables_in_query=()
-        
+
+        # CTE names from WITH clauses must be excluded from the table list:
+        # "... SELECT * FROM cte" where cte is a CTE would otherwise be counted
+        # as a second, distinct "table", false-blocking same-table CTE unions.
+        local cte_names=()
+        while IFS= read -r cte_name; do
+            [[ -n "$cte_name" ]] && cte_names+=("$cte_name")
+        done < <(echo "$normalized_query" | grep -oE 'with[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*' | sed 's/.*[[:space:]]//' || true)
+
         # Pattern to extract table names from FROM and JOIN clauses
         # This is a simplified extraction - real-world queries can be more complex
         while IFS= read -r table_name; do
@@ -761,7 +792,14 @@ check_union_safety() {
                 # Clean up the table name
                 table_name=$(echo "$table_name" | sed 's/[`,;().]*//g' | xargs)
                 if [[ -n "$table_name" && ! "$table_name" =~ ^(select|from|join|where|and|or|not|in|null|true|false|as|on|using|group|order|limit|offset|union|intersect|except|with)$ ]]; then
-                    tables_in_query+=("$table_name")
+                    local is_cte=false
+                    for cte_name in "${cte_names[@]}"; do
+                        if [[ "$table_name" == "$cte_name" ]]; then
+                            is_cte=true
+                            break
+                        fi
+                    done
+                    [[ "$is_cte" == false ]] && tables_in_query+=("$table_name")
                 fi
             fi
         done < <(echo "$normalized_query" | grep -oE 'from[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*|join[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*' | sed 's/.*[[:space:]]//' || true)
@@ -815,9 +853,8 @@ check_union_safety() {
                 echo "Found tables: ${unique_tables[*]}" >&2
                 echo "For safe UNION operations, use:" >&2
                 echo "  1. UNION ALL with the same table" >&2
-                echo "  2. UNION in WITH clauses (CTEs)" >&2
-                echo "  3. --allow-union-tables=table1,table2 flag for trusted tables" >&2
-                echo "  4. Ensure all tables in the UNION are explicitly whitelisted" >&2
+                echo "  2. --allow-union-tables=table1,table2 flag for trusted tables" >&2
+                echo "  3. Ensure all tables in the UNION are explicitly whitelisted" >&2
                 exit "$EXIT_SAFETY"
             fi
         fi
@@ -840,8 +877,7 @@ check_union_safety() {
     echo "Error: UNION queries are not allowed by default due to security concerns." >&2
     echo "For safe UNION operations, use:" >&2
     echo "  1. UNION ALL with the same table" >&2
-    echo "  2. UNION in WITH clauses (CTEs)" >&2
-    echo "  3. --allow-union-tables=table1,table2 flag for trusted tables" >&2
+    echo "  2. --allow-union-tables=table1,table2 flag for trusted tables" >&2
     exit "$EXIT_SAFETY"
 }
 
@@ -864,8 +900,12 @@ normalize_query_content() {
         exit 1
     fi
     
-    # Trim whitespace
-    normalized_query=$(echo "$normalized_query" | xargs 2>/dev/null || echo "")
+    # Trim leading/trailing whitespace. NB: never use `xargs` for this — xargs
+    # applies shell quoting rules, so an unbalanced single quote (common in
+    # injection-looking string data) made it error out and silently TRUNCATE
+    # the query to its balanced-quote prefix, letting the safety checks below
+    # run against an innocuous fragment instead of the real text.
+    normalized_query=$(printf '%s' "$normalized_query" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     
     if [[ -z "$normalized_query" ]]; then
         echo "Error: Query is empty or contains only whitespace/comments" >&2
@@ -989,6 +1029,21 @@ echo "$db_type"
     fi
 
     return 1
+}
+
+# Detect whether the active DB2 driver is jt400 (AS/400 / IBM i). True when
+# a jt400 JAR is present and no db2jcc JAR is; db2jcc (DB2 LUW) takes
+# precedence when both are available.
+is_as400_driver() {
+    local has_db2jcc=""
+    local has_jt400=""
+    if ls "$DRIVERS_DIR"/*db2jcc* 1>/dev/null 2>&1 || ls "$SCRIPT_DIR"/*db2jcc* 1>/dev/null 2>&1; then
+        has_db2jcc="1"
+    fi
+    if ls "$DRIVERS_DIR"/*jt400* 1>/dev/null 2>&1 || ls "$SCRIPT_DIR"/*jt400* 1>/dev/null 2>&1; then
+        has_jt400="1"
+    fi
+    [[ -n "$has_jt400" && -z "$has_db2jcc" ]]
 }
 
 # Validate and sanitize database connection and content
@@ -1125,8 +1180,14 @@ validate_jdbc_params() {
     fi
     
     if [[ -z "$db_database" ]]; then
-        echo "Error: Database name is required for $db_type" >&2
-        exit 1
+        # AS/400 (jt400) connects to the system, not a named database, so a
+        # database name is not required (or even used in the JDBC URL).
+        if [[ "$db_type" == "db2" ]] && is_as400_driver; then
+            debug "AS/400 driver detected; database name not required"
+        else
+            echo "Error: Database name is required for $db_type" >&2
+            exit 1
+        fi
     fi
     
     if [[ -z "$db_user" ]]; then
@@ -1210,18 +1271,38 @@ configure_database() {
             DRIVER_JAR="${DRIVER_JAR:-mssql-jdbc*.jar}"
             ;;
         db2)
-            DB_PORT="${DB_PORT:-50000}"
-            JDBC_DRIVER_CLASS="${JDBC_DRIVER_CLASS:-com.ibm.db2.jcc.DB2Driver}"
-            if [[ -z "${JDBC_URL:-}" ]]; then
-                local timeout="${DB_TIMEOUT:-30}"
-                JDBC_URL="jdbc:db2://${DB_HOST}:${DB_PORT}/${DB_DATABASE}:clientProgramName=${timeout};"
+            if is_as400_driver; then
+                # AS/400 (IBM i) via jt400: connect to the system, not a named
+                # database, so DB_DATABASE is ignored and the port is optional.
+                JDBC_DRIVER_CLASS="${JDBC_DRIVER_CLASS:-com.ibm.as400.access.AS400JDBCDriver}"
+                if [[ -z "${JDBC_URL:-}" ]]; then
+                    local timeout="${DB_TIMEOUT:-30}"
+                    JDBC_URL="jdbc:as400://${DB_HOST}"
+                    if [[ -n "${DB_PORT:-}" ]]; then
+                        JDBC_URL="${JDBC_URL}:${DB_PORT}"
+                    fi
+                    JDBC_URL="${JDBC_URL};naming=system;login timeout=${timeout}"
+                fi
+                DRIVER_JAR="${DRIVER_JAR:-jt400*.jar}"
+            else
+                # DB2 LUW via db2jcc (also the fallback when no driver is
+                # present yet; find_driver_jar may auto-download jt400).
+                DB_PORT="${DB_PORT:-50000}"
+                JDBC_DRIVER_CLASS="${JDBC_DRIVER_CLASS:-com.ibm.db2.jcc.DB2Driver}"
+                if [[ -z "${JDBC_URL:-}" ]]; then
+                    local timeout="${DB_TIMEOUT:-30}"
+                    JDBC_URL="jdbc:db2://${DB_HOST}:${DB_PORT}/${DB_DATABASE}:clientProgramName=${timeout};"
+                fi
+                DRIVER_JAR="${DRIVER_JAR:-db2jcc*.jar jt400*.jar}"
             fi
-            DRIVER_JAR="${DRIVER_JAR:-db2jcc*.jar jt400*.jar}"
             ;;
         h2)
             DB_PORT="${DB_PORT:-9092}"
             JDBC_DRIVER_CLASS="${JDBC_DRIVER_CLASS:-org.h2.Driver}"
             if [[ -z "${JDBC_URL:-}" ]]; then
+                # timeout is a local declared per-branch; without it this
+                # reference was unbound under set -u (h2 config crashed).
+                local timeout="${DB_TIMEOUT:-30}"
                 JDBC_URL="jdbc:h2:tcp://${DB_HOST}:${DB_PORT}/${DB_DATABASE};loginTimeout=${timeout}"
             fi
             DRIVER_JAR="${DRIVER_JAR:-h2*.jar}"
@@ -1248,8 +1329,14 @@ configure_database() {
             exit 1
         fi
         
-        # Check for potentially dangerous JDBC URL patterns
-        if [[ "$JDBC_URL" =~ [\$\`\\\<\>\&\|\;] ]]; then
+        # Check for potentially dangerous JDBC URL patterns. Note: '&' and ';'
+        # are REQUIRED separators in standard JDBC URLs (mysql/postgres use
+        # ?a=1&b=2, sqlserver/h2/db2 use ;key=value), so only genuine shell
+        # metacharacters are rejected here. The URL is passed to the JVM via
+        # the environment, never interpolated into a shell command, so '&'/' ;'
+        # are safe; SQL-keyword injection is already caught by
+        # validate_database_security().
+        if [[ "$JDBC_URL" =~ [\$\`\\\<\>\|] ]]; then
             echo "Error: JDBC URL contains potentially dangerous characters" >&2
             exit 1
         fi
@@ -1496,8 +1583,10 @@ load_env() {
             # Skip empty lines and comments
             [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
             
-            # Skip lines that don't contain an equals sign
-            [[ ! "$line" =~ ^[^=]+=[^=]*$ ]] && continue
+            # Skip lines that don't contain an equals sign. The value may itself
+            # contain '=' (e.g. DB_PASSWORD=a=b=c), so only require the var= prefix;
+            # var_value below keeps everything after the first '='.
+            [[ ! "$line" =~ ^[^=]+= ]] && continue
             
             # Extract variable name and value
             local var_name="${line%%=*}"
@@ -1557,6 +1646,9 @@ load_env() {
         fi
     fi
     debug "Using database type: $db_type"
+    # Stash the effective type globally: get_daemon_config_hash() uses it to
+    # decide which connection fields actually matter for the daemon.
+    DB_TYPE="$db_type"
     
     # Initialize database connection with security validation
     initialize_database_connection "$db_type"
@@ -1637,8 +1729,13 @@ load_env() {
     fi
 
     if [[ -z "${DB_DATABASE:-}" && "$db_type" != "sqlite" ]]; then
-        echo "Error: Database name is required" >&2
-        exit 1
+        # AS/400 (jt400) connects to the system, not a named database.
+        if [[ "$db_type" == "db2" ]] && is_as400_driver; then
+            debug "AS/400 driver detected; database name not required"
+        else
+            echo "Error: Database name is required" >&2
+            exit 1
+        fi
     fi
 }
 
@@ -1656,6 +1753,8 @@ execute_query() {
         fi
         debug "Daemon not available, falling back to single-query mode"
     fi
+
+    ensure_java_available
 
     local temp_dir
     temp_dir=$(mktemp -d)
@@ -1726,10 +1825,15 @@ local classpath
     debug "Running java: $JAVA_BIN -cp $classpath:$compilation_dir QueryRunner"
 }
 
-# Check for Java availability
-if ! check_java_availability; then
-    download_standalone_jdk
-fi
+# Locate java/javac, downloading a standalone JDK as a last resort. Invoked
+# lazily right before compilation so CLI-only actions (--help, --version,
+# --list-drivers, --download-driver, --daemon-stop/status) work even when no
+# JDK is installed.
+ensure_java_available() {
+    if ! check_java_availability; then
+        download_standalone_jdk
+    fi
+}
 
 # Enhanced validate_cli_option with better error messages
 validate_cli_option() {
@@ -2127,6 +2231,23 @@ DAEMON_SOCKET="$HOME/.query_runner/daemon.sock"
 DAEMON_PORT_FILE="$HOME/.query_runner/daemon.port"
 DAEMON_PID_FILE="$HOME/.query_runner/daemon.pid"
 DAEMON_CLASS_DIR="$HOME/.query_runner/daemon_class"
+DAEMON_CONFIG_HASH_FILE="$HOME/.query_runner/daemon.config_hash"
+
+get_daemon_config_hash() {
+    # Fingerprint of the connection config exported to the daemon. If the
+    # config changes between invocations, the wrapper restarts the daemon;
+    # otherwise a warmed daemon would silently serve queries against the
+    # wrong database. For SQLite the connection depends ONLY on the JDBC URL
+    # (jdbc:sqlite:<file>): DB_USER/DB_PASSWORD/DB_HOST are ignored by the
+    # driver, so hash just the URL to avoid needless restarts when those
+    # change (e.g. tests probing -u/-h validation would otherwise restart
+    # the daemon for every single invocation).
+    if [[ "${DB_TYPE:-}" == "sqlite" ]]; then
+        printf '%s' "${JDBC_URL:-}|${JDBC_DRIVER_CLASS:-}" | md5sum | cut -d' ' -f1
+    else
+        printf '%s' "${JDBC_URL:-}|${JDBC_DRIVER_CLASS:-}|${DB_USER:-}|${DB_PASSWORD:-}" | md5sum | cut -d' ' -f1
+    fi
+}
 
 is_daemon_running() {
     # Prefer the strongest signal (live Unix socket + pid, or live INET port + pid).
@@ -2167,7 +2288,7 @@ cleanup_stale_daemon_state() {
     pid=$(cat "$DAEMON_PID_FILE" 2>/dev/null || echo "")
     if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
         debug "Cleaning up stale daemon state (dead PID: $pid)"
-        rm -f "$DAEMON_PID_FILE" "$DAEMON_PORT_FILE" "$DAEMON_SOCKET" 2>/dev/null || true
+        rm -f "$DAEMON_PID_FILE" "$DAEMON_PORT_FILE" "$DAEMON_SOCKET" "$DAEMON_CONFIG_HASH_FILE" 2>/dev/null || true
     fi
 }
 
@@ -2195,6 +2316,7 @@ start_daemon() {
         debug "Daemon already running (PID: $(get_daemon_pid))"
         return 0
     fi
+    ensure_java_available
     debug "Starting daemon${foreground:+ (foreground, for systemd)}..."
 
     init_cache
@@ -2205,25 +2327,19 @@ start_daemon() {
     classpath=$(build_classpath "$JAR_FILE")
     classpath="$classpath:$DAEMON_CLASS_DIR"
 
-    if [[ ! -d "$DAEMON_CLASS_DIR" ]] || [[ -z "$(ls -A "$DAEMON_CLASS_DIR" 2>/dev/null)" ]]; then
-        # When the directory is non-empty, we still need to verify the cache is for the
-        # current script. Without this, edits to the daemon's Java heredoc would be
-        # ignored because the existing .class files are reused.
-        local current_script_hash
-        current_script_hash=$(get_source_hash)
-        local cached_hash
-        cached_hash=$(cat "$DAEMON_CLASS_DIR/.script_hash" 2>/dev/null || echo "")
-        if [[ "$cached_hash" != "$current_script_hash" ]]; then
-            debug "Daemon class cache stale (script hash changed); recompiling"
-            rm -rf "$DAEMON_CLASS_DIR"
-        fi
+    # Verify the compiled daemon classes match the current script (hash). This
+    # must run even when the dir is populated: previously the check lived inside
+    # the "dir missing/empty" branch, so edits to the daemon's Java heredoc were
+    # silently ignored — the stale .class files kept being reused forever.
+    local current_script_hash
+    current_script_hash=$(get_source_hash)
+    local cached_hash
+    cached_hash=$(cat "$DAEMON_CLASS_DIR/.script_hash" 2>/dev/null || echo "")
+    if [[ "$cached_hash" != "$current_script_hash" ]]; then
+        debug "Daemon class cache stale (script hash changed); recompiling"
+        rm -rf "$DAEMON_CLASS_DIR"
     fi
     if [[ ! -d "$DAEMON_CLASS_DIR" ]] || [[ -z "$(ls -A "$DAEMON_CLASS_DIR" 2>/dev/null)" ]]; then
-        # Note: if the heredoc above this changes, the cached .class becomes stale but the
-        # directory isn't empty, so this branch is skipped and the daemon runs the old
-        # binary. The script-hash check above (when DAEMON_CLASS_DIR exists) catches that
-        # and nukes the directory, so the heredoc is recompiled. Without that check,
-        # editing the daemon's Java code would silently keep running the old daemon.
         mkdir -p "$DAEMON_CLASS_DIR"
         local temp_dir
         temp_dir=$(mktemp -d)
@@ -2258,6 +2374,9 @@ public class QueryDaemon {
     private static final int POOL_MAX_SIZE = 10;
     private static final int POOL_MIN_IDLE = 2;
     private static final long POOL_TIMEOUT_MS = 30000L;
+    // Keep parity with the single-query path (QueryRunner.MAX_ROWS): truncate
+    // huge result sets instead of building an unbounded in-memory response.
+    private static final int MAX_ROWS = 1000000;
 
     private static long parseIdleTimeout() {
         String v = System.getenv("QUERY_RUNNER_DAEMON_IDLE_SECS");
@@ -2534,7 +2653,7 @@ public class QueryDaemon {
         int columnCount = meta.getColumnCount();
         List<String> columnNames = new ArrayList<>();
         for (int i = 1; i <= columnCount; i++) {
-            columnNames.add(meta.getColumnName(i));
+            columnNames.add(sanitizeOutput(meta.getColumnName(i)));
         }
 
         StringBuilder result = new StringBuilder();
@@ -2548,20 +2667,24 @@ public class QueryDaemon {
         result.append("],");
         result.append("\"data\":");
 
+        boolean[] truncated = { false };
         switch (format) {
             case "json":
-                result.append(formatJson(rs, columnNames, columnCount));
+                result.append(formatJson(rs, columnNames, columnCount, truncated));
                 break;
             case "csv":
-                result.append(formatCsv(rs, columnNames, columnCount));
+                result.append(formatCsv(rs, columnNames, columnCount, truncated));
                 break;
             case "pretty":
-                result.append(formatPretty(rs, columnNames, columnCount));
+                result.append(formatPretty(rs, columnNames, columnCount, truncated));
                 break;
             default:
-                result.append(formatText(rs, columnNames, columnCount));
+                result.append(formatText(rs, columnNames, columnCount, truncated));
         }
 
+        if (truncated[0]) {
+            result.append(",\"truncated\":true");
+        }
         result.append("}");
         return result.toString();
     }
@@ -2589,11 +2712,13 @@ public class QueryDaemon {
         }
     }
 
-    private String formatText(ResultSet rs, List<String> columnNames, int columnCount) throws SQLException {
+    private String formatText(ResultSet rs, List<String> columnNames, int columnCount, boolean[] truncated) throws SQLException {
         StringBuilder sb = new StringBuilder();
         sb.append("[");
         boolean firstRow = true;
+        int rowCount = 0;
         while (rs.next()) {
+            if (rowCount >= MAX_ROWS) { truncated[0] = true; break; }
             if (!firstRow) sb.append(",");
             firstRow = false;
             sb.append("[");
@@ -2603,20 +2728,23 @@ public class QueryDaemon {
                 if (value == null) {
                     sb.append("null");
                 } else {
-                    sb.append("\"").append(JsonUtil.escapeJsonEmpty(value.toString())).append("\"");
+                    sb.append("\"").append(JsonUtil.escapeJsonEmpty(sanitizeOutput(value.toString()))).append("\"");
                 }
             }
             sb.append("]");
+            rowCount++;
         }
         sb.append("]");
         return sb.toString();
     }
 
-    private String formatJson(ResultSet rs, List<String> columnNames, int columnCount) throws SQLException {
+    private String formatJson(ResultSet rs, List<String> columnNames, int columnCount, boolean[] truncated) throws SQLException {
         StringBuilder sb = new StringBuilder();
         sb.append("[");
         boolean firstRow = true;
+        int rowCount = 0;
         while (rs.next()) {
+            if (rowCount >= MAX_ROWS) { truncated[0] = true; break; }
             if (!firstRow) sb.append(",");
             firstRow = false;
             sb.append("{");
@@ -2629,16 +2757,17 @@ public class QueryDaemon {
                 } else if (value instanceof Number || value instanceof Boolean) {
                     sb.append(value.toString());
                 } else {
-                    sb.append("\"").append(JsonUtil.escapeJsonEmpty(value.toString())).append("\"");
+                    sb.append("\"").append(JsonUtil.escapeJsonEmpty(sanitizeOutput(value.toString()))).append("\"");
                 }
             }
             sb.append("}");
+            rowCount++;
         }
         sb.append("]");
         return sb.toString();
     }
 
-    private String formatCsv(ResultSet rs, List<String> columnNames, int columnCount) throws SQLException {
+    private String formatCsv(ResultSet rs, List<String> columnNames, int columnCount, boolean[] truncated) throws SQLException {
         StringBuilder sb = new StringBuilder();
         sb.append("[[");
         for (int i = 0; i < columnCount; i++) {
@@ -2647,7 +2776,9 @@ public class QueryDaemon {
         }
         sb.append("],");
         boolean firstRow = true;
+        int rowCount = 0;
         while (rs.next()) {
+            if (rowCount >= MAX_ROWS) { truncated[0] = true; break; }
             if (!firstRow) sb.append(",");
             firstRow = false;
             sb.append("[");
@@ -2657,23 +2788,27 @@ public class QueryDaemon {
                 if (value == null) {
                     sb.append("null");
                 } else {
-                    sb.append("\"").append(JsonUtil.escapeJsonEmpty(value.toString().replace("\"", "\"\""))).append("\"");
+                    sb.append("\"").append(JsonUtil.escapeJsonEmpty(sanitizeOutput(value.toString()).replace("\"", "\"\""))).append("\"");
                 }
             }
             sb.append("]");
+            rowCount++;
         }
         sb.append("]");
         return sb.toString();
     }
 
-    private String formatPretty(ResultSet rs, List<String> columnNames, int columnCount) throws SQLException {
+    private String formatPretty(ResultSet rs, List<String> columnNames, int columnCount, boolean[] truncated) throws SQLException {
         List<Map<String, Object>> rows = new ArrayList<>();
+        int rowCount = 0;
         while (rs.next()) {
+            if (rowCount >= MAX_ROWS) { truncated[0] = true; break; }
             Map<String, Object> row = new LinkedHashMap<>();
             for (int i = 0; i < columnCount; i++) {
                 row.put(columnNames.get(i), rs.getObject(i + 1));
             }
             rows.add(row);
+            rowCount++;
         }
 
         StringBuilder sb = new StringBuilder();
@@ -2692,7 +2827,7 @@ public class QueryDaemon {
                 if (value == null) {
                     sb.append("null");
                 } else {
-                    sb.append("\"").append(JsonUtil.escapeJsonEmpty(value.toString())).append("\"");
+                    sb.append("\"").append(JsonUtil.escapeJsonEmpty(sanitizeOutput(value.toString()))).append("\"");
                 }
             }
             sb.append("}");
@@ -2927,6 +3062,34 @@ public class QueryDaemon {
                   .replaceAll("(?i)(host|server)\\s*[:=]\\s*[^\\s,;]+", "$1=******");
     }
 
+    // Mirror QueryRunner.sanitizeOutput: strip control chars and HTML/shell
+    // metacharacters so daemon-mode output matches the single-query path
+    // (which sanitizes text/csv/pretty values and, since the JSON parity fix,
+    // JSON string values too).
+    private static String sanitizeOutput(String str) {
+        if (str == null) return null;
+        int len = str.length();
+        boolean needsStrip = false;
+        for (int i = 0; i < len; i++) {
+            char c = str.charAt(i);
+            if (c < 0x20 || c == '<' || c == '>' || c == '\\' || c == '`'
+                || c == '$' || c == '|') {
+                needsStrip = true;
+                break;
+            }
+        }
+        if (!needsStrip) return str;
+        StringBuilder sb = new StringBuilder(len);
+        for (int i = 0; i < len; i++) {
+            char c = str.charAt(i);
+            if (c >= 0x20 && c != '<' && c != '>' && c != '\\' && c != '`'
+                && c != '$' && c != '|') {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
     private String jsonResponse(String status, String key, Object value) {
         return String.format("{\"status\":\"%s\",\"%s\":%s}", status, key,
             value instanceof String ? "\"" + JsonUtil.escapeJsonEmpty((String) value) + "\"" : value);
@@ -2987,6 +3150,14 @@ public class QueryDaemon {
                     if (newConn != null) {
                         connections.add(newConn);
                         idleCount++;
+                    } else if (connections.isEmpty()) {
+                        // No idle connections and creating one just failed.
+                        // Permanent failures (missing driver class, refused or
+                        // unresolvable host) will fail on every retry, so fail
+                        // fast instead of spinning the full POOL_TIMEOUT_MS and
+                        // stalling the client behind a daemon that can never
+                        // connect.
+                        throw new SQLException("Failed to establish database connection");
                     }
                 }
                 if (connections.isEmpty()) {
@@ -3131,6 +3302,9 @@ DAEMON_EOF
                 debug "Daemon started with PID: $daemon_pid"
             fi
         fi
+        # Record which connection config this daemon was started with so a later
+        # config change triggers a restart instead of silent wrong-DB queries.
+        get_daemon_config_hash > "$DAEMON_CONFIG_HASH_FILE"
         return 0
     else
         echo "Error: Failed to start daemon" >&2
@@ -3154,7 +3328,10 @@ stop_daemon() {
     debug "Stopping daemon (PID: $pid)..."
 
     if [[ -S "$DAEMON_SOCKET" ]]; then
-        echo '{"type":"shutdown"}' | timeout 5 socat - UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || true
+        # -t 10 keeps the socket open after stdin EOF so the daemon's response
+        # (even a large one) is drained; without it socat half-closes on stdin
+        # EOF and the daemon gets EPIPE mid-write.
+        echo '{"type":"shutdown"}' | timeout 5 socat -t 10 - UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || true
     elif [[ -f "$DAEMON_PORT_FILE" ]]; then
         local port
         port=$(cat "$DAEMON_PORT_FILE" 2>/dev/null || echo "")
@@ -3169,7 +3346,7 @@ stop_daemon() {
         sleep 0.5
     fi
 
-    rm -f "$DAEMON_PID_FILE" "$DAEMON_SOCKET" "$DAEMON_PORT_FILE" 2>/dev/null || true
+    rm -f "$DAEMON_PID_FILE" "$DAEMON_SOCKET" "$DAEMON_PORT_FILE" "$DAEMON_CONFIG_HASH_FILE" 2>/dev/null || true
     echo "Daemon stopped"
 }
 
@@ -3187,7 +3364,7 @@ daemon_status() {
         echo "Daemon is running (PID: $pid, $endpoint)"
         local response
         if [[ -S "$DAEMON_SOCKET" ]]; then
-            response=$(echo '{"type":"status"}' | timeout 2 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{"status":"error"}')
+            response=$(echo '{"type":"status"}' | timeout 2 socat -t 2 UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null || echo '{"status":"error"}')
         elif [[ -f "$DAEMON_PORT_FILE" ]]; then
             local port
             port=$(cat "$DAEMON_PORT_FILE" 2>/dev/null || echo "")
@@ -3212,6 +3389,18 @@ execute_query_daemon() {
             return 1
         fi
         start_daemon || return 1
+    else
+        # The daemon bakes its connection config at startup. If the current
+        # invocation's config differs from the running daemon's, restart it so
+        # queries never silently hit the wrong database.
+        local expected_hash actual_hash
+        expected_hash=$(get_daemon_config_hash)
+        actual_hash=$(cat "$DAEMON_CONFIG_HASH_FILE" 2>/dev/null || echo "")
+        if [[ -n "$actual_hash" && "$actual_hash" != "$expected_hash" ]]; then
+            debug "Daemon connection config changed; restarting daemon"
+            stop_daemon >/dev/null 2>&1 || true
+            start_daemon || return 1
+        fi
     fi
 
     local params_section=""
@@ -3223,7 +3412,11 @@ execute_query_daemon() {
     local response
 
     if [[ -S "$DAEMON_SOCKET" ]]; then
-        response=$(echo "$request" | timeout 30 socat UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null)
+        # -t 10: after stdin EOF (echo pipe), keep the connection open so the
+        # daemon can write the response. Without it, socat closes the socket on
+        # stdin EOF and large responses get dropped (daemon sees Broken pipe),
+        # silently falling back to single-query mode.
+        response=$(echo "$request" | timeout 30 socat -t 10 UNIX-CONNECT:"$DAEMON_SOCKET" - 2>/dev/null)
     elif [[ -f "$DAEMON_PORT_FILE" ]]; then
         local port
         port=$(cat "$DAEMON_PORT_FILE" 2>/dev/null || echo "")
@@ -3249,6 +3442,11 @@ execute_query_daemon() {
         data=$(echo "$response" | jq '.data' 2>/dev/null || echo "[]")
 
         format_daemon_output "$output_format" "$columns" "$data"
+        # The daemon caps result sets at 1M rows (same as single-query mode);
+        # surface the same WARN when it had to truncate.
+        if [[ "$(echo "$response" | jq -r '.truncated // false' 2>/dev/null || echo "false")" == "true" ]]; then
+            warn "Result set truncated at 1000000 rows for security"
+        fi
         return 0
     else
         local error_msg
@@ -3270,7 +3468,10 @@ format_daemon_output() {
             if [[ -n "$col_names" ]]; then
                 echo "$col_names"
             fi
-            echo "$data" | jq -r '.[] | .[]' 2>/dev/null | paste - - | tr '\t' '\n' | while IFS= read -r row; do
+            # paste - - joins consecutive value lines into one tab-separated
+            # row; previously a tr '\t' '\n' undid that grouping, so every
+            # column value landed on its own line instead of tab-separated rows.
+            echo "$data" | jq -r '.[] | .[]' 2>/dev/null | paste - - | while IFS= read -r row; do
                 echo "$row"
             done
             ;;
@@ -3344,8 +3545,10 @@ if [[ -n "$DAEMON_ACTION" ]]; then
     esac
 fi
 
-# Set DEBUG based on CLI flags or environment variable
-DEBUG="${CLI_VERBOSE:-${CLI_DEBUG:-${QUERY_RUNNER_DEBUG:-0}}}"
+# Set DEBUG based on CLI flags or environment variable. The incoming DEBUG
+# env var is honored too (tests and scripts set DEBUG=1 expecting verbose
+# output); CLI flags still win, then DEBUG, then QUERY_RUNNER_DEBUG.
+DEBUG="${CLI_VERBOSE:-${CLI_DEBUG:-${DEBUG:-${QUERY_RUNNER_DEBUG:-0}}}}"
 if [[ "$DEBUG" != "0" && "$DEBUG" != "false" ]]; then
     debug "Debug mode enabled (DEBUG=$DEBUG)."
 fi
@@ -3400,7 +3603,18 @@ elif [[ -n "$QUERY_FILE" ]]; then
         fi
     fi
 else
-    # Read from stdin with proper error handling
+    # Read from stdin with proper error handling. First a zero-timeout
+    # availability probe: `read -t 0` polls without consuming anything (the
+    # piped query survives intact for cat below), so this is safe. If no input
+    # is available right now — an idle TTY or an open pipe with nothing written
+    # yet — error out instead of blocking forever: the supported input modes
+    # are -q, QUERY_FILE, and a populated pipe (echo ... | query_runner).
+    if ! IFS= read -r -t 0 _; then
+        echo "Error: No query provided" >&2
+        echo "Usage: $0 [OPTIONS] [QUERY_FILE]" >&2
+        echo "   or: echo 'SELECT * FROM table' | $0 [OPTIONS]" >&2
+        exit 1
+    fi
     if ! query=$(cat -) 2>/dev/null; then
         if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
             echo "Error: Failed to read query from stdin" >&2

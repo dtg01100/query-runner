@@ -6,9 +6,15 @@ public class QueryRunner {
 
     private static final int MAX_ROWS = 1000000;
     private static final int MAX_VALUE_LENGTH = 10000;
+    // Rows buffered between flushes to stdout. Bounds memory for large result
+    // sets instead of accumulating the entire output (which could be hundreds
+    // of MB for 1M wide rows) before printing once.
+    private static final int FLUSH_ROWS = 512;
 
-    // Pre-compiled pattern for number detection (avoids regex compilation per value)
-    private static final Pattern NUMBER_PATTERN = Pattern.compile("^-?\\d+(\\.\\d+)?([eE][+-]?\\d+)?$");
+    private static void flushChunk(StringBuilder sb) {
+        System.out.print(sb.toString());
+        sb.setLength(0);
+    }
 
     private static boolean isDebug() {
         String v = System.getenv("QUERY_RUNNER_DEBUG");
@@ -38,7 +44,12 @@ public class QueryRunner {
 
     private static String sanitizeJdbcUrl(String url) {
         if (url == null) return null;
-        url = url.replaceAll("[\\p{Cntrl}\\\\<>\"'&|;]", "");
+        // Keep '&' and ';' - they are required JDBC URL property separators
+        // (mysql/postgres use ?a=1&b=2, sqlserver/h2/db2/as400 use ;key=value).
+        // The wrapper already rejects real shell metacharacters before this
+        // point, and the URL is passed to the JVM via the environment, never
+        // interpolated into a shell command.
+        url = url.replaceAll("[\\p{Cntrl}\\\\<>\"'|`$]", "");
         if (!url.startsWith("jdbc:")) {
             return url;
         }
@@ -174,14 +185,6 @@ public class QueryRunner {
                 stmt.setString(i + 1, value.toString());
             }
         }
-    }
-
-    private static String repeatString(String str, int count) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < count; i++) {
-            sb.append(str);
-        }
-        return sb.toString();
     }
 
     public static void main(String[] args) {
@@ -360,11 +363,17 @@ public class QueryRunner {
                 } else if (value instanceof Boolean) {
                     sb.append(value);
                 } else {
-                    sb.append('"').append(JsonUtil.escapeJson(value.toString())).append('"');
+                    // Sanitize before escaping so HTML/shell-capable content
+                    // (<script>, backticks, ...) is stripped even from JSON.
+                    sb.append('"').append(JsonUtil.escapeJson(sanitizeOutput(value.toString()))).append('"');
                 }
             }
             sb.append('}');
             rowCount++;
+            // Flush in bounded chunks so a 1M-row result doesn't accumulate in
+            // memory; the closing bracket/envelope suffix is appended after the
+            // loop, so the JSON stream stays well-formed across flushes.
+            if (rowCount % FLUSH_ROWS == 0) flushChunk(sb);
         }
         sb.append(']');
         if (envelope) {
@@ -376,7 +385,7 @@ public class QueryRunner {
             }
             sb.append("]}");
         }
-        System.out.print(sb.toString());
+        flushChunk(sb);
         if (truncated && !isWarningsSuppressed()) {
             // Stable, greppable prefix on stderr. Suppressed when the wrapper
             // exports QUERY_RUNNER_NO_WARNINGS=1 (--quiet / --no-warnings).
@@ -387,16 +396,16 @@ public class QueryRunner {
     private static void outputCsvStream(List<String> columnNames, ResultSet rs) throws SQLException {
         int colCount = columnNames.size();
         // Pre-compute header row with sanitized and escaped column names
-        StringBuilder header = new StringBuilder(colCount * 24);
+        StringBuilder sb = new StringBuilder(colCount * 24);
         for (int i = 0; i < colCount; i++) {
-            if (i > 0) header.append(',');
+            if (i > 0) sb.append(',');
             String columnName = sanitizeOutput(columnNames.get(i));
-            header.append('"').append(columnName.replace("\"", "\"\"")).append('"');
+            sb.append('"').append(columnName.replace("\"", "\"\"")).append('"');
         }
-        header.append('\n');
-        
-        StringBuilder sb = new StringBuilder(8192);
-        sb.append(header);
+        sb.append('\n');
+        flushChunk(sb);
+
+        int rowCount = 0;
         while (rs.next()) {
             for (int i = 0; i < colCount; i++) {
                 if (i > 0) sb.append(',');
@@ -410,22 +419,24 @@ public class QueryRunner {
                 }
             }
             sb.append('\n');
+            rowCount++;
+            if (rowCount % FLUSH_ROWS == 0) flushChunk(sb);
         }
-        System.out.print(sb.toString());
+        flushChunk(sb);
     }
 
     private static void outputTextStream(List<String> columnNames, ResultSet rs) throws SQLException {
         int colCount = columnNames.size();
         // Pre-compute header row
-        StringBuilder header = new StringBuilder(colCount * 16);
+        StringBuilder sb = new StringBuilder(colCount * 16);
         for (int i = 0; i < colCount; i++) {
-            if (i > 0) header.append('\t');
-            header.append(sanitizeOutput(columnNames.get(i)));
+            if (i > 0) sb.append('\t');
+            sb.append(sanitizeOutput(columnNames.get(i)));
         }
-        header.append('\n');
+        sb.append('\n');
+        flushChunk(sb);
 
-        StringBuilder sb = new StringBuilder(8192);
-        sb.append(header);
+        int rowCount = 0;
         while (rs.next()) {
             for (int i = 0; i < colCount; i++) {
                 if (i > 0) sb.append('\t');
@@ -438,8 +449,10 @@ public class QueryRunner {
                 }
             }
             sb.append('\n');
+            rowCount++;
+            if (rowCount % FLUSH_ROWS == 0) flushChunk(sb);
         }
-        System.out.print(sb.toString());
+        flushChunk(sb);
     }
 
     private static void outputPretty(List<String> columnNames, List<Map<String, Object>> rows) {

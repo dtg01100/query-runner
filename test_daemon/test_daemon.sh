@@ -101,10 +101,12 @@ run_sub_suite() {
 	output=$(bash "$script" 2>&1) || rc=$?
 	rc=${rc:-0}
 	echo "$output"
-	# Tally from the suite's 'Passed:' / 'Failed:' lines.
-	local p f
-	p=$(echo "$output" | grep -E '^[A-Z].*Passed:[[:space:]]+[0-9]+' | tail -1 | grep -oE '[0-9]+$' || echo 0)
-	f=$(echo "$output" | grep -E 'Failed:[[:space:]]+[0-9]+' | tail -1 | grep -oE '[0-9]+$' || echo 0)
+	# Strip ANSI escape codes before grepping: sub-suites use `echo -e` with
+	# color escapes that throw off pattern matching.
+	local clean p f
+	clean=$(echo "$output" | sed -E 's/\x1b\[[0-9;]*[mGKHF]//g')
+	p=$(echo "$clean" | grep -E '^Passed:[[:space:]]+[0-9]+' | tail -1 | grep -oE '[0-9]+$' || echo 0)
+	f=$(echo "$clean" | grep -E '^Failed:[[:space:]]+[0-9]+' | tail -1 | grep -oE '[0-9]+$' || echo 0)
 	TESTS_PASSED=$((TESTS_PASSED + ${p:-0}))
 	TESTS_FAILED=$((TESTS_FAILED + ${f:-0}))
 	return $rc
